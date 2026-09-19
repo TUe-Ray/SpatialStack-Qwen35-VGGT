@@ -78,6 +78,8 @@ mkdir -p "$OUTPUT_DIR"
 # Training Hyperparameters
 # ======================
 LR="${LR:-1e-5}"
+MAX_STEPS="${MAX_STEPS:--1}"
+SAVE_STEPS="${SAVE_STEPS:-1000}"
 total_batch_size="${TOTAL_BATCH_SIZE:-64}"
 
 if [ "$WORLD_SIZE" -gt 0 ]; then
@@ -97,6 +99,12 @@ echo ">>>>> grad accum = $GRADIENT_ACCUMULATION_STEPS"
 DATASETS="${DATASETS:-spar_234k%60,llava_hound_64k%60,vlm3r_scannet%60,vsi_appr_order%50}"             # [DataArguments] Dataset list
 GEOMETRY_ENCODER_TYPE="${GEOMETRY_ENCODER_TYPE:-vggt}"
 USE_GEOMETRY_ENCODER="${USE_GEOMETRY_ENCODER:-true}"
+USE_CACHED_VGGT="${USE_CACHED_VGGT:-false}"
+CONTROLLED_FUSION_CANDIDATE="${CONTROLLED_FUSION_CANDIDATE:-}"
+CACHED_VGGT_MANIFEST="${CACHED_VGGT_MANIFEST:-}"
+CACHED_VGGT_NUM_FRAMES="${CACHED_VGGT_NUM_FRAMES:-32}"
+TUNE_MM_LLM="${TUNE_MM_LLM:-true}"
+LORA_ENABLE="${LORA_ENABLE:-false}"
 DATA_FLATTEN="${DATA_FLATTEN:-False}"
 FEATURE_FUSION_METHOD="${FEATURE_FUSION_METHOD:-deepstack_language_add}"
 GEOMETRY_FUSION_LAYERS="${GEOMETRY_FUSION_LAYERS:-0 1 2}"
@@ -105,7 +113,7 @@ VISION_LANGUAGE_FUSION_LAYERS="${VISION_LANGUAGE_FUSION_LAYERS:-}"
 
 train_args=(
          --model_name_or_path "$MODEL_PATH"
-         --tune_mm_llm True
+         --tune_mm_llm "$TUNE_MM_LLM"
          --tune_mm_vision False
          --tune_mm_mlp False
          --dataset_use "$DATASETS"
@@ -128,11 +136,12 @@ train_args=(
          --video_max_frame_pixels $((1664*28*28))
          --video_min_frame_pixels $((256*28*28))
          --num_train_epochs 1
+         --max_steps "$MAX_STEPS"
          --warmup_ratio 0.03
          --lr_scheduler_type cosine
          --weight_decay 0.01
          --logging_steps 10
-         --save_steps 1000
+         --save_steps "$SAVE_STEPS"
          --save_total_limit 10
          --deepspeed scripts/zero2_opt.json
          --gradient_checkpointing
@@ -141,7 +150,25 @@ train_args=(
          --seed 0
          --report_to none
          --use_geometry_encoder "$USE_GEOMETRY_ENCODER"
+         --use_cached_vggt "$USE_CACHED_VGGT"
+         --lora_enable "$LORA_ENABLE"
 )
+
+if [[ "${USE_CACHED_VGGT,,}" == "true" ]]; then
+    if [[ "${USE_GEOMETRY_ENCODER,,}" == "true" ]]; then
+        echo ">>>>> USE_CACHED_VGGT and USE_GEOMETRY_ENCODER are mutually exclusive" >&2
+        exit 2
+    fi
+    if [[ -z "$CONTROLLED_FUSION_CANDIDATE" || -z "$CACHED_VGGT_MANIFEST" ]]; then
+        echo ">>>>> cached mode requires CONTROLLED_FUSION_CANDIDATE and CACHED_VGGT_MANIFEST" >&2
+        exit 2
+    fi
+    train_args+=(
+         --controlled_fusion_candidate "$CONTROLLED_FUSION_CANDIDATE"
+         --cached_vggt_manifest "$CACHED_VGGT_MANIFEST"
+         --cached_vggt_num_frames "$CACHED_VGGT_NUM_FRAMES"
+    )
+fi
 
 if [[ "${USE_GEOMETRY_ENCODER,,}" == "true" ]]; then
     train_args+=(

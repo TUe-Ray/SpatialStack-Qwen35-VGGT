@@ -54,11 +54,38 @@ def rank0_print(*args):
         print(*args)
 
 
+def save_controlled_vggt_artifact(model, output_dir: str) -> None:
+    base_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+    controlled_module = getattr(base_model, "controlled_vggt_fusion", None)
+    if controlled_module is None:
+        return
+    controlled_state = {
+        f"model.controlled_vggt_fusion.{key}": value.detach().cpu()
+        for key, value in controlled_module.state_dict().items()
+    }
+    torch.save(controlled_state, os.path.join(output_dir, "controlled_vggt_fusion.bin"))
+    base_model.config.save_pretrained(output_dir)
+
+
+class ControlledCheckpointTrainer(Trainer):
+    """Keep fusion state beside every PEFT adapter/checkpoint."""
+
+    def _save(self, output_dir=None, state_dict=None):
+        output_dir = output_dir or self.args.output_dir
+        super()._save(output_dir=output_dir, state_dict=state_dict)
+        if self.args.should_save:
+            save_controlled_vggt_artifact(self.model, output_dir)
+
+
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
     """Collects the state dict and dump to disk."""
 
     if trainer.deepspeed:
         torch.cuda.synchronize()
+        trainer.save_model(output_dir)
+        return
+
+    if hasattr(trainer.model, "peft_config"):
         trainer.save_model(output_dir)
         return
 
@@ -68,8 +95,12 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
+        save_controlled_vggt_artifact(trainer.model, output_dir)
+
 
 def resolve_model_modules(model):
+    if hasattr(model, "get_base_model"):
+        model = model.get_base_model()
     if hasattr(model, "visual") and hasattr(model, "model"):
         return model.visual, getattr(model.visual, "merger", None), model.model, model.lm_head
 
@@ -82,6 +113,9 @@ def resolve_model_modules(model):
 
 def set_model(model_args, model):
     visual_module, merger_module, language_module, lm_head = resolve_model_modules(model)
+
+    if model_args.use_cached_vggt and (model_args.tune_mm_vision or model_args.tune_mm_mlp):
+        raise ValueError("Controlled cached-VGGT candidates require the Qwen vision tower and native merger frozen")
 
     if model_args.tune_mm_vision:
         for n, p in visual_module.named_parameters():
@@ -114,6 +148,75 @@ def set_model(model_args, model):
         for n, p in model.geometry_encoder.named_parameters():
             p.requires_grad = False
 
+    controlled_module = getattr(model, "controlled_vggt_fusion", None)
+    if controlled_module is not None:
+        for parameter in controlled_module.parameters():
+            parameter.requires_grad = True
+
+
+def add_language_lora(model_args, model):
+    if not model_args.lora_enable:
+        return model
+    try:
+        from peft import LoraConfig, get_peft_model
+    except ImportError as exc:
+        raise RuntimeError("lora_enable requires PEFT; dependencies are not installed automatically") from exc
+
+    base_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+    target_modules = [
+        name
+        for name, module in base_model.named_modules()
+        if name.startswith("model.language_model.layers.") and isinstance(module, torch.nn.Linear)
+    ]
+    if not target_modules:
+        raise RuntimeError("No Qwen3.5 language-model Linear modules were found for LoRA")
+    config = LoraConfig(
+        r=model_args.lora_r,
+        lora_alpha=model_args.lora_alpha,
+        lora_dropout=model_args.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=target_modules,
+    )
+    model = get_peft_model(model, config)
+    if model_args.use_cached_vggt:
+        base_model = model.get_base_model()
+        controlled_module = getattr(base_model, "controlled_vggt_fusion", None)
+        if controlled_module is None:
+            raise RuntimeError("PEFT wrapping lost the controlled VGGT fusion module")
+        for parameter in controlled_module.parameters():
+            parameter.requires_grad = True
+    return model
+
+
+def audit_controlled_trainable_parameters(model):
+    base_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+    if getattr(base_model, "geometry_encoder", None) is not None:
+        raise RuntimeError("Online geometry encoder exists in a cached-VGGT controlled run")
+    visual_module, merger_module, _, _ = resolve_model_modules(model)
+    if any(parameter.requires_grad for parameter in visual_module.parameters()):
+        raise RuntimeError("Qwen vision parameters must be frozen in controlled runs")
+    if merger_module is not None and any(parameter.requires_grad for parameter in merger_module.parameters()):
+        raise RuntimeError("Qwen native visual merger must be frozen in controlled runs")
+    trainable = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    if not trainable:
+        raise RuntimeError("No trainable parameters")
+    unexpected = [
+        name
+        for name, _ in trainable
+        if "controlled_vggt_fusion" not in name and "lora_" not in name
+    ]
+    if unexpected:
+        raise RuntimeError(f"Unexpected trainable parameters in controlled run: {unexpected[:20]}")
+    nonfinite = [name for name, parameter in trainable if not torch.isfinite(parameter.detach().float()).all()]
+    if nonfinite:
+        raise RuntimeError(f"Non-finite trainable initialization: {nonfinite[:20]}")
+    return {
+        "total": sum(parameter.numel() for _, parameter in trainable),
+        "fusion": sum(parameter.numel() for name, parameter in trainable if "controlled_vggt_fusion" in name),
+        "lora": sum(parameter.numel() for name, parameter in trainable if "lora_" in name),
+    }
+
 def train(attn_implementation="flash_attention_2"):
     global local_rank
 
@@ -121,6 +224,12 @@ def train(attn_implementation="flash_attention_2"):
         (ModelArguments, DataArguments, TrainingArguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    if model_args.use_cached_vggt and model_args.use_geometry_encoder:
+        raise ValueError("use_cached_vggt and use_geometry_encoder are mutually exclusive")
+    if model_args.use_cached_vggt and not model_args.lora_enable:
+        raise ValueError("Controlled SFT requires lora_enable so both candidates share the same trainable LLM scope")
+    if model_args.use_cached_vggt and training_args.per_device_train_batch_size != 1:
+        raise ValueError("Controlled cached-VGGT SFT currently requires per-device batch size 1")
     set_seed(training_args.seed)
     # enable_full_determinism(training_args.seed)
 
@@ -200,7 +309,7 @@ def train(attn_implementation="flash_attention_2"):
 
         from transformers import Qwen3_5ForConditionalGeneration
 
-        if model_args.use_geometry_encoder:
+        if model_args.use_geometry_encoder or model_args.use_cached_vggt:
             from qwen_vl.model.modeling_qwen3_5 import Qwen3_5ForConditionalGenerationWithGeometry
 
             for k in [
@@ -216,19 +325,51 @@ def train(attn_implementation="flash_attention_2"):
                 "include_camera_token",
                 "pos_encoding_type",
                 "vision_language_fusion_layers",
+                "use_cached_vggt",
+                "controlled_fusion_candidate",
+                "controlled_cross_attention_heads",
+                "controlled_fusion_dropout",
+                "controlled_projector_hidden_dim",
             ]:
                 setattr(config, k, getattr(model_args, k))
 
-            assert model_args.geometry_encoder_path is not None, (
-                "geometry_encoder_path must be set in the config when use_geometry_encoder is True."
-            )
-            model = Qwen3_5ForConditionalGenerationWithGeometry.from_pretrained(
+            if model_args.use_cached_vggt:
+                valid_candidates = {"a_premerger_cross_attn", "b_llm_add"}
+                if model_args.controlled_fusion_candidate not in valid_candidates:
+                    raise ValueError(
+                        f"controlled_fusion_candidate must be one of {sorted(valid_candidates)}"
+                    )
+                if not data_args.cached_vggt_manifest:
+                    raise ValueError("cached_vggt_manifest is required in cached-VGGT mode")
+                actual_dimensions = (
+                    config.vision_config.hidden_size,
+                    config.vision_config.out_hidden_size,
+                    config.text_config.hidden_size,
+                    config.text_config.num_hidden_layers,
+                )
+                expected_dimensions = (1024, 2560, 2560, 32)
+                if actual_dimensions != expected_dimensions:
+                    raise ValueError(
+                        f"Controlled held-out runs require Qwen3.5-4B dimensions {expected_dimensions}, "
+                        f"got {actual_dimensions}"
+                    )
+                data_args.cached_vggt_layers = (
+                    [23]
+                    if model_args.controlled_fusion_candidate == "a_premerger_cross_attn"
+                    else [11, 17, 23]
+                )
+            elif model_args.geometry_encoder_path is None:
+                raise ValueError("geometry_encoder_path is required when use_geometry_encoder is true")
+
+            model_load_kwargs = dict(
                 pretrained_model_name_or_path=model_args.model_name_or_path,
                 config=config,
                 cache_dir=training_args.cache_dir,
                 torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
-                geometry_encoder_path=model_args.geometry_encoder_path,
             )
+            if model_args.use_geometry_encoder:
+                model_load_kwargs["geometry_encoder_path"] = model_args.geometry_encoder_path
+            model = Qwen3_5ForConditionalGenerationWithGeometry.from_pretrained(**model_load_kwargs)
         else:
             model = Qwen3_5ForConditionalGeneration.from_pretrained(
                 model_args.model_name_or_path,
@@ -270,6 +411,7 @@ def train(attn_implementation="flash_attention_2"):
         use_fast=False,
     )
     set_model(model_args, model)
+    model = add_language_lora(model_args, model)
 
     import torch.distributed as dist
 
@@ -278,18 +420,34 @@ def train(attn_implementation="flash_attention_2"):
 
     if is_rank_zero():
         visual_module, _, language_module, _ = resolve_model_modules(model)
-        visual_module.print_trainable_parameters()
-        language_module.print_trainable_parameters()
+        if hasattr(visual_module, "print_trainable_parameters"):
+            visual_module.print_trainable_parameters()
+        if hasattr(language_module, "print_trainable_parameters"):
+            language_module.print_trainable_parameters()
+        if model_args.use_cached_vggt:
+            rank0_print(f"Controlled trainable audit: {audit_controlled_trainable_parameters(model)}")
 
     print(model.config)
     if model_args.use_geometry_encoder:
         setattr(data_args, "use_geometry_encoder", model_args.use_geometry_encoder)
+    if model_args.use_cached_vggt:
+        setattr(data_args, "use_cached_vggt", True)
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-    trainer = Trainer(
+    trainer_class = ControlledCheckpointTrainer if model_args.use_cached_vggt else Trainer
+    trainer = trainer_class(
         model=model, processing_class=tokenizer, args=training_args, **data_module
     )
 
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+    checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+    if checkpoints:
+        if model_args.use_cached_vggt:
+            from qwen_vl.model.modeling_qwen3_5 import load_qwen3_5_controlled_submodules
+
+            checkpoint = max(checkpoints, key=lambda path: int(path.name.split("-")[-1]))
+            base_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+            loaded = load_qwen3_5_controlled_submodules(base_model, str(checkpoint))
+            if loaded == 0:
+                raise RuntimeError(f"Controlled checkpoint has no fusion artifact: {checkpoint}")
         logging.info("checkpoint found, resume training")
         trainer.train(resume_from_checkpoint=True)
     else:

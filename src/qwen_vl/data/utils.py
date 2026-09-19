@@ -154,7 +154,7 @@ def load_and_preprocess_images(image_path_list, mode="crop", target_size=518):
     return images
 
 
-def prepare_image_inputs(image, image_processor, model_type="qwen2.5vl"):
+def prepare_image_inputs(image, image_processor, model_type="qwen2.5vl", include_geometry=True):
     images = load_and_preprocess_images([image])
     merge_size: int = getattr(image_processor, "merge_size")
     patch_size: int = getattr(image_processor, "patch_size")
@@ -170,14 +170,15 @@ def prepare_image_inputs(image, image_processor, model_type="qwen2.5vl"):
     image_tensor = visual_processed["pixel_values"]
     grid_thw = visual_processed["image_grid_thw"]
 
-    if model_type == "qwen3.5":
+    geometry_encoder_inputs = None
+    if include_geometry and model_type == "qwen3.5":
         rgb_image = _load_rgb_image(image)
         _, grid_h, grid_w = grid_thw[0].tolist()
         geometry_width = grid_w * GEOMETRY_ENCODER_PATCH_SIZE
         geometry_height = grid_h * GEOMETRY_ENCODER_PATCH_SIZE
         geometry_image = rgb_image.resize((geometry_width, geometry_height), Image.Resampling.BICUBIC)
         geometry_encoder_inputs = TF.ToTensor()(geometry_image)
-    else:
+    elif include_geometry:
         geometry_encoder_inputs = copy.deepcopy(images[0])
 
     return {

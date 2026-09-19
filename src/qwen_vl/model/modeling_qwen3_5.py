@@ -29,6 +29,7 @@ from .feature_fusion import (
 )
 from .geometry_encoders import GeometryEncoderConfig, create_geometry_encoder
 from .position_utils import get_2d_sincos_pos_embed
+from .controlled_vggt_fusion import CachedVGGTControlledFusion
 
 
 GEOMETRY_STATE_KEYWORDS = (
@@ -36,6 +37,7 @@ GEOMETRY_STATE_KEYWORDS = (
     "language_feature_fusion",
     "feature_fusion",
     "geometry_merger",
+    "controlled_vggt_fusion",
 )
 
 
@@ -45,6 +47,7 @@ def move_qwen3_5_geometry_modules_to_device(
     feature_fusion: Optional[nn.Module],
     geometry_merger: Optional[nn.Module],
     geometry_merger_list: Optional[nn.Module],
+    controlled_vggt_fusion: Optional[nn.Module],
     device: Optional[torch.device],
     dtype: Optional[torch.dtype] = None,
 ):
@@ -72,6 +75,11 @@ def move_qwen3_5_geometry_modules_to_device(
             geometry_merger_list.to(device=device, dtype=dtype)
         else:
             geometry_merger_list.to(device=device)
+    if controlled_vggt_fusion is not None and hasattr(controlled_vggt_fusion, "to"):
+        if dtype is not None:
+            controlled_vggt_fusion.to(device=device, dtype=dtype)
+        else:
+            controlled_vggt_fusion.to(device=device)
 
 
 def align_qwen3_5_geometry_modules(model):
@@ -100,6 +108,7 @@ def align_qwen3_5_geometry_modules(model):
         getattr(inner_model, "feature_fusion", None),
         getattr(inner_model, "geometry_merger", None),
         getattr(inner_model, "geometry_merger_list", None),
+        getattr(inner_model, "controlled_vggt_fusion", None),
         device,
         dtype,
     )
@@ -108,6 +117,7 @@ def align_qwen3_5_geometry_modules(model):
     model.feature_fusion = getattr(inner_model, "feature_fusion", None)
     model.geometry_merger = getattr(inner_model, "geometry_merger", None)
     model.geometry_merger_list = getattr(inner_model, "geometry_merger_list", None)
+    model.controlled_vggt_fusion = getattr(inner_model, "controlled_vggt_fusion", None)
     return model
 
 
@@ -121,10 +131,11 @@ def _iter_qwen3_5_checkpoint_files(pretrained_model_name_or_path: str) -> List[P
     direct_candidates = [
         checkpoint_path / "model.safetensors",
         checkpoint_path / "pytorch_model.bin",
+        checkpoint_path / "controlled_vggt_fusion.bin",
     ]
-    for candidate in direct_candidates:
-        if candidate.exists():
-            return [candidate]
+    existing_direct = [candidate for candidate in direct_candidates if candidate.exists()]
+    if existing_direct:
+        return existing_direct
 
     index_candidates = [
         checkpoint_path / "model.safetensors.index.json",
@@ -257,6 +268,11 @@ def _load_qwen3_5_geometry_submodules(model, pretrained_model_name_or_path: str)
     return loaded_key_count
 
 
+def load_qwen3_5_controlled_submodules(model, checkpoint_root: str) -> int:
+    """Public checkpoint hook used after loading a PEFT adapter base model."""
+    return _load_qwen3_5_geometry_submodules(model, checkpoint_root)
+
+
 class Qwen3_5TextModelWithGeometry(Qwen3_5TextModel):
     def forward(
         self,
@@ -272,6 +288,7 @@ class Qwen3_5TextModelWithGeometry(Qwen3_5TextModel):
         image_mask: Optional[torch.Tensor] = None,
         grid_thw: Optional[torch.Tensor] = None,
         include_camera_token: bool = False,
+        controlled_language_residuals: Optional[Dict[int, torch.Tensor]] = None,
         **kwargs,
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -354,6 +371,20 @@ class Qwen3_5TextModelWithGeometry(Qwen3_5TextModel):
         for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             layer_mask = linear_attn_mask if decoder_layer.layer_type == "linear_attention" else causal_mask
 
+            # SpatialFocus controlled semantics: add before LLM blocks 0/1/2.
+            if controlled_language_residuals is not None and layer_idx in controlled_language_residuals:
+                if image_mask is None:
+                    raise ValueError("Controlled language injection requires an image placeholder mask")
+                vision_token_mask = image_mask[..., 0]
+                residual = controlled_language_residuals[layer_idx]
+                if hidden_states[vision_token_mask].shape != residual.shape:
+                    raise ValueError(
+                        f"Layer {layer_idx} controlled residual shape {tuple(residual.shape)} does not match "
+                        f"visual token shape {tuple(hidden_states[vision_token_mask].shape)}"
+                    )
+                hidden_states = hidden_states.clone()
+                hidden_states[vision_token_mask] = hidden_states[vision_token_mask] + residual
+
             hidden_states = decoder_layer(
                 hidden_states,
                 position_embeddings=position_embeddings,
@@ -400,7 +431,13 @@ class Qwen3_5ModelWithGeometry(Qwen3_5Model):
         self.feature_fusion = None
         self.geometry_merger = None
         self.geometry_merger_list = None
+        self.controlled_vggt_fusion = None
         self._geometry_modules_initialized = False
+
+        if getattr(config, "use_cached_vggt", False):
+            if getattr(config, "use_geometry_encoder", False):
+                raise ValueError("Online geometry and cached VGGT fusion are mutually exclusive")
+            self.controlled_vggt_fusion = CachedVGGTControlledFusion(config)
 
         if getattr(config, "use_geometry_encoder", False):
             self._validate_geometry_config(config)
@@ -522,6 +559,7 @@ class Qwen3_5ModelWithGeometry(Qwen3_5Model):
             getattr(self, "feature_fusion", None),
             getattr(self, "geometry_merger", None),
             getattr(self, "geometry_merger_list", None),
+            getattr(self, "controlled_vggt_fusion", None),
             device,
             dtype,
         )
@@ -641,6 +679,8 @@ class Qwen3_5ModelWithGeometry(Qwen3_5Model):
         mm_token_type_ids: torch.IntTensor | None = None,
         cache_position: torch.LongTensor | None = None,
         geometry_encoder_inputs: Optional[List[torch.Tensor]] = None,
+        cached_vggt_features: Optional[List[Dict[str, torch.Tensor]]] = None,
+        cached_vggt_frame_idx: Optional[List[torch.Tensor]] = None,
         **kwargs,
     ) -> Qwen3_5ModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -660,6 +700,7 @@ class Qwen3_5ModelWithGeometry(Qwen3_5Model):
 
         image_mask = None
         vision_layer_features = None
+        controlled_language_residuals = None
         if pixel_values is not None:
             image_outputs = self.get_image_features(
                 pixel_values,
@@ -667,8 +708,47 @@ class Qwen3_5ModelWithGeometry(Qwen3_5Model):
                 return_dict=True,
                 output_hidden_states=should_capture_vision_layers,
             )
-            image_embeds = image_outputs.pooler_output
-            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            is_prefill = cache_position is None or (
+                isinstance(cache_position, torch.Tensor) and int(cache_position[0].item()) == 0
+            )
+            use_cached_vggt = getattr(self.config, "use_cached_vggt", False)
+            if use_cached_vggt:
+                if self.geometry_encoder is not None:
+                    raise RuntimeError("Online geometry encoder must not exist in cached-VGGT mode")
+                if self.controlled_vggt_fusion is None:
+                    raise RuntimeError("Cached VGGT fusion module is not initialized")
+                if not is_prefill:
+                    raise ValueError("pixel_values/cached VGGT features may only be supplied during prefill")
+                if cached_vggt_features is None or len(cached_vggt_features) != 1:
+                    raise ValueError("Controlled cached-VGGT fusion currently requires per-device batch size 1")
+                feature_map = cached_vggt_features[0]
+                expected_frames = int(image_grid_thw.shape[0])
+                if cached_vggt_frame_idx is None or len(cached_vggt_frame_idx) != 1:
+                    raise ValueError("cached_vggt_frame_idx is required for provenance validation")
+                if cached_vggt_frame_idx[0].numel() != expected_frames:
+                    raise ValueError("RGB and cached VGGT frame counts differ")
+                candidate = self.controlled_vggt_fusion.candidate
+                if candidate == CachedVGGTControlledFusion.CANDIDATE_A:
+                    premerger = image_outputs.last_hidden_state.to(inputs_embeds.device, inputs_embeds.dtype)
+                    fused_premerger = self.controlled_vggt_fusion.fuse_premerger(
+                        premerger, feature_map, image_grid_thw
+                    )
+                    # Preserve the native Qwen visual merger/projector exactly.
+                    image_embeds = self.visual.merger(fused_premerger)
+                else:
+                    image_embeds = torch.cat(image_outputs.pooler_output, dim=0)
+                    controlled_language_residuals = self.controlled_vggt_fusion.build_language_residuals(
+                        feature_map,
+                        image_grid_thw,
+                        dtype=inputs_embeds.dtype,
+                        device=inputs_embeds.device,
+                    )
+                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            else:
+                if cached_vggt_features is not None or cached_vggt_frame_idx is not None:
+                    raise ValueError("Cached VGGT inputs were supplied while use_cached_vggt is disabled")
+                image_embeds = image_outputs.pooler_output
+                image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             if should_capture_vision_layers:
                 vision_layer_features = getattr(image_outputs, "hidden_states", None)
             should_fuse_post_merger_geometry = (
@@ -764,6 +844,7 @@ class Qwen3_5ModelWithGeometry(Qwen3_5Model):
             image_mask=image_mask,
             grid_thw=grid_thw,
             include_camera_token=include_camera_token,
+            controlled_language_residuals=controlled_language_residuals,
             **kwargs,
         )
 
@@ -782,10 +863,13 @@ class Qwen3_5ForConditionalGenerationWithGeometry(Qwen3_5ForConditionalGeneratio
         self.feature_fusion = self.model.feature_fusion
         self.geometry_merger = self.model.geometry_merger
         self.geometry_merger_list = self.model.geometry_merger_list
+        self.controlled_vggt_fusion = self.model.controlled_vggt_fusion
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         self.post_init()
         if self.language_feature_fusion is not None:
             self.language_feature_fusion.reset_residual_branches_to_noop()
+        if self.controlled_vggt_fusion is not None:
+            self.controlled_vggt_fusion.reset_native_initialization()
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
@@ -797,6 +881,9 @@ class Qwen3_5ForConditionalGenerationWithGeometry(Qwen3_5ForConditionalGeneratio
         if geometry_encoder_path and getattr(model.model, "geometry_encoder", None) is not None:
             model.model.geometry_encoder.load_model(geometry_encoder_path)
         if getattr(model.config, "use_geometry_encoder", False):
+            resolved_checkpoint_root = _resolve_qwen3_5_checkpoint_root(pretrained_model_name_or_path)
+            _load_qwen3_5_geometry_submodules(model, resolved_checkpoint_root)
+        if getattr(model.config, "use_cached_vggt", False):
             resolved_checkpoint_root = _resolve_qwen3_5_checkpoint_root(pretrained_model_name_or_path)
             _load_qwen3_5_geometry_submodules(model, resolved_checkpoint_root)
         return align_qwen3_5_geometry_modules(model)
@@ -817,6 +904,8 @@ class Qwen3_5ForConditionalGenerationWithGeometry(Qwen3_5ForConditionalGeneratio
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         geometry_encoder_inputs: Optional[List[torch.Tensor]] = None,
+        cached_vggt_features: Optional[List[Dict[str, torch.Tensor]]] = None,
+        cached_vggt_frame_idx: Optional[List[torch.Tensor]] = None,
         tag: Optional[str] = None,
         **kwargs,
     ) -> Qwen3_5CausalLMOutputWithPast:
@@ -833,6 +922,8 @@ class Qwen3_5ForConditionalGenerationWithGeometry(Qwen3_5ForConditionalGeneratio
             cache_position=cache_position,
             mm_token_type_ids=mm_token_type_ids,
             geometry_encoder_inputs=geometry_encoder_inputs,
+            cached_vggt_features=cached_vggt_features,
+            cached_vggt_frame_idx=cached_vggt_frame_idx,
             **kwargs,
         )
 
@@ -852,3 +943,13 @@ class Qwen3_5ForConditionalGenerationWithGeometry(Qwen3_5ForConditionalGeneratio
             attentions=outputs.attentions,
             rope_deltas=outputs.rope_deltas,
         )
+
+    def _prepare_position_ids_for_generation(self, inputs_tensor, model_kwargs):
+        # The upstream helper forwards all generation kwargs into get_rope_index,
+        # whose signature does not know about cached VGGT payloads.
+        rope_kwargs = {
+            key: value
+            for key, value in model_kwargs.items()
+            if key not in {"cached_vggt_features", "cached_vggt_frame_idx"}
+        }
+        return super()._prepare_position_ids_for_generation(inputs_tensor, rope_kwargs)

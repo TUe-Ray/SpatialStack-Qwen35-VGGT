@@ -24,6 +24,18 @@ class ModelArguments:
     pos_encoding_type: str = field(default="none")  # Position encoding: "none", "rope2d", or "sincos2d"
     vision_language_fusion_layers: Optional[List[int]] = field(default=None)  # Vision block indices to fuse into decoder
 
+    # Held-out controlled cached-VGGT experiment. This is mutually exclusive
+    # with use_geometry_encoder.
+    use_cached_vggt: bool = field(default=False)
+    controlled_fusion_candidate: Optional[str] = field(default=None)
+    controlled_cross_attention_heads: int = field(default=16)
+    controlled_fusion_dropout: float = field(default=0.1)
+    controlled_projector_hidden_dim: int = field(default=4096)
+    lora_enable: bool = field(default=False)
+    lora_r: int = field(default=128)
+    lora_alpha: int = field(default=256)
+    lora_dropout: float = field(default=0.05)
+
 @dataclass
 class DataArguments:
     dataset_use: str = field(default="")
@@ -37,6 +49,10 @@ class DataArguments:
     video_min_frame_pixels: int = field(default=4 * 28 * 28)
     max_samples: int = field(default=-1)
     shuffle: bool = field(default=True)
+    cached_vggt_manifest: Optional[str] = field(default=None)
+    cached_vggt_num_frames: int = field(default=32)
+    cached_vggt_verify_sha256: bool = field(default=True)
+    cached_vggt_layers: Optional[List[int]] = field(default=None)
 
 
 @dataclass

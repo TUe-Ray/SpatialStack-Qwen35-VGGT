@@ -24,6 +24,7 @@ import transformers
 from . import data_list
 from .rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_35
 from .utils import prepare_image_inputs
+from .cached_vggt import CachedVGGTStore
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
@@ -204,6 +205,8 @@ class LazySupervisedDataset(Dataset):
 
         dataset = data_args.dataset_use.split(",")
         dataset_list = data_list(dataset)
+        if len(dataset_list) != len(dataset):
+            raise ValueError("Dataset registry did not resolve every requested dataset alias")
         print(f"Loading datasets: {dataset_list}")
         self.video_max_total_pixels = getattr(
             data_args, "video_max_total_pixels", 1664 * 28 * 28
@@ -221,7 +224,7 @@ class LazySupervisedDataset(Dataset):
 
         list_data_dict = []
 
-        for data in dataset_list:
+        for dataset_name, data in zip(dataset, dataset_list):
             file_format = data["annotation_path"].split(".")[-1]
             if file_format == "jsonl":
                 annotations = read_jsonl(data["annotation_path"], max_samples=data_args.max_samples)
@@ -238,6 +241,7 @@ class LazySupervisedDataset(Dataset):
             for ann in annotations:
                 ann["data_path"] = data["data_path"]
                 ann["tag"] = data["tag"]
+                ann["_dataset_name"] = dataset_name
             list_data_dict += annotations
 
         print(f"Total training samples: {len(list_data_dict)}")
@@ -252,6 +256,16 @@ class LazySupervisedDataset(Dataset):
         self.data_args.image_processor.min_pixels = data_args.min_pixels
         self.data_args.image_processor.size["longest_edge"] = data_args.max_pixels
         self.data_args.image_processor.size["shortest_edge"] = data_args.min_pixels
+        self.cached_vggt_store = None
+        if getattr(data_args, "use_cached_vggt", False):
+            if data_args.data_flatten:
+                raise ValueError("Cached VGGT mode does not support flattened batches")
+            self.cached_vggt_store = CachedVGGTStore(
+                manifest_path=data_args.cached_vggt_manifest,
+                required_layers=data_args.cached_vggt_layers,
+                num_frames=data_args.cached_vggt_num_frames,
+                verify_sha256=data_args.cached_vggt_verify_sha256,
+            )
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -368,6 +382,10 @@ class LazySupervisedDataset(Dataset):
     
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        if self.cached_vggt_store is not None:
+            # Provenance failures must identify the exact requested sample; never
+            # replace it with a neighboring example.
+            return self._get_item(i)
         num_base_retries = 3
         num_final_retries = 30
 
@@ -441,14 +459,24 @@ class LazySupervisedDataset(Dataset):
         return images
 
     def _get_item(self, i) -> Dict[str, torch.Tensor]:
-        sources = self.list_data_dict[i]
+        sources = copy.deepcopy(self.list_data_dict[i])
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
         video = None
+        cached_vggt_sample = None
+        image = None
         
         if "video" in sources[0]:
-            sources[0]["images"] = self.read_video_images(sources[0])
+            if self.cached_vggt_store is not None:
+                cached_vggt_sample = self.cached_vggt_store.load(
+                    dataset=sources[0]["_dataset_name"],
+                    video=sources[0]["video"],
+                    data_root=sources[0]["data_path"],
+                )
+                sources[0]["images"] = cached_vggt_sample.images
+            else:
+                sources[0]["images"] = self.read_video_images(sources[0])
             num_image = len(sources[0]["images"])
             conv_value = sources[0]["conversations"][0]['value']
             replacement_tokens = "".join([DEFAULT_IMAGE_TOKEN] * num_image)
@@ -478,8 +506,8 @@ class LazySupervisedDataset(Dataset):
 
         # notice that we use images as the tag
         if "image" in sources[0]:
-            image_folder = self.list_data_dict[i]["data_path"]
-            image_file = self.list_data_dict[i]["image"]
+            image_folder = sources[0]["data_path"]
+            image_file = sources[0]["image"]
             if isinstance(image_file, List):
 
                 if isinstance(image_file[0], str):
@@ -500,9 +528,11 @@ class LazySupervisedDataset(Dataset):
                         file,
                         self.data_args.image_processor,
                         model_type=self.model_type,
+                        include_geometry=getattr(self.data_args, "use_geometry_encoder", False),
                     )
                     image.append(ret["pixel_values"])
-                    geometry_encoder_inputs.append(ret["geometry_encoder_inputs"])
+                    if ret["geometry_encoder_inputs"] is not None:
+                        geometry_encoder_inputs.append(ret["geometry_encoder_inputs"])
                     grid_thw.append(ret["image_grid_thw"])
             else:
                 raise NotImplementedError
@@ -589,11 +619,18 @@ class LazySupervisedDataset(Dataset):
                 position_ids=position_ids,
             )
 
-        if "image" in self.list_data_dict[i]:
+        if image is not None:
             data_dict["pixel_values"] = image
             data_dict["image_grid_thw"] = grid_thw
             if getattr(self.data_args, "use_geometry_encoder", False):
                 data_dict["geometry_encoder_inputs"] = geometry_encoder_inputs
+            if cached_vggt_sample is not None:
+                if len(grid_thw) != len(cached_vggt_sample.frame_idx):
+                    raise ValueError("Qwen RGB preprocessing changed the cached frame count")
+                data_dict["cached_vggt_features"] = cached_vggt_sample.features
+                data_dict["cached_vggt_frame_idx"] = cached_vggt_sample.frame_idx
+                data_dict["cached_vggt_frame_positions"] = cached_vggt_sample.frame_positions
+                data_dict["cached_vggt_sidecar"] = cached_vggt_sample.sidecar_path
         # video exist in the data
         elif "video" in self.list_data_dict[i]:
             data_dict["pixel_values_videos"] = video
@@ -706,6 +743,11 @@ class DataCollatorForSupervisedDataset(object):
             tags = [instance.get("tag", "3d") for instance in instances]
             assert len(set(tags)) == 1, "all data in a batch should have the same tag"
             batch["tag"] = tags[0]
+        if "cached_vggt_features" in instances[0]:
+            if any("cached_vggt_features" not in instance for instance in instances):
+                raise ValueError("A batch may not mix cached-VGGT and non-cached samples")
+            batch["cached_vggt_features"] = [instance["cached_vggt_features"] for instance in instances]
+            batch["cached_vggt_frame_idx"] = [instance["cached_vggt_frame_idx"] for instance in instances]
         return batch
 
 
@@ -794,6 +836,8 @@ class FlattenedDataCollatorForSupervisedDataset(DataCollatorForSupervisedDataset
         # assume all data in a batch has geometry_encoder_inputs
         if "geometry_encoder_inputs" in instances[0]:
             raise NotImplementedError("FlattenedDataCollatorForSupervisedDataset does not support geometry_encoder_inputs")
+        if "cached_vggt_features" in instances[0]:
+            raise NotImplementedError("FlattenedDataCollatorForSupervisedDataset does not support cached VGGT")
 
         return batch
 

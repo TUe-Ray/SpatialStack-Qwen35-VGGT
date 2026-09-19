@@ -1,5 +1,7 @@
+import json
 import re
 import time
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import decord
@@ -18,6 +20,7 @@ from lmms_eval.api.instance import Instance
 from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.model_utils.load_video import read_video_pyav_pil
+from qwen_vl.data.cached_vggt import CachedVGGTStore
 
 
 MIN_QWEN3_5_TRANSFORMERS_VERSION = Version("5.3.0")
@@ -108,6 +111,14 @@ def move_qwen3_5_eval_inputs_to_device(inputs, device):
     inputs = inputs.to(device)
     if "geometry_encoder_inputs" in inputs:
         inputs["geometry_encoder_inputs"] = [tensor.to(device) for tensor in inputs["geometry_encoder_inputs"]]
+    if "cached_vggt_features" in inputs:
+        inputs["cached_vggt_features"] = [
+            {layer: tensor.to(device) for layer, tensor in feature_map.items()}
+            for feature_map in inputs["cached_vggt_features"]
+        ]
+        inputs["cached_vggt_frame_idx"] = [
+            tensor.to(device) for tensor in inputs["cached_vggt_frame_idx"]
+        ]
     return inputs
 
 
@@ -132,6 +143,10 @@ class Qwen3_5(lmms):
         strip_thinking: bool = True,
         max_length: Optional[int] = None,
         geometry_encoder_path: Optional[str] = None,
+        cached_vggt_manifest: Optional[str] = None,
+        cached_vggt_dataset: str = "vsibench",
+        cached_vggt_data_root: Optional[str] = None,
+        cached_vggt_verify_sha256: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -149,6 +164,8 @@ class Qwen3_5(lmms):
         self.add_frame_index = add_frame_index
         self.disable_thinking = disable_thinking
         self.strip_thinking = strip_thinking
+        self.cached_vggt_dataset = cached_vggt_dataset
+        self.cached_vggt_data_root = cached_vggt_data_root
         self.fast_path_runtime = detect_qwen3_5_fast_path_runtime()
         if not all(self.fast_path_runtime.values()):
             missing = ", ".join(name for name, available in self.fast_path_runtime.items() if not available)
@@ -168,11 +185,25 @@ class Qwen3_5(lmms):
             self._device = torch.device(f"cuda:{accelerator.local_process_index}")
             self.device_map = f"cuda:{accelerator.local_process_index}"
 
+        adapter_config_path = Path(pretrained) / "adapter_config.json"
+        adapter_path = str(Path(pretrained).resolve()) if adapter_config_path.is_file() else None
+        model_source = pretrained
+        if adapter_path is not None:
+            with adapter_config_path.open("r", encoding="utf-8") as handle:
+                adapter_config = json.load(handle)
+            model_source = adapter_config.get("base_model_name_or_path")
+            if not model_source:
+                raise ValueError(f"PEFT adapter has no base_model_name_or_path: {adapter_config_path}")
         config = AutoConfig.from_pretrained(pretrained)
         model_type = getattr(config, "model_type", None)
         if model_type not in {"qwen3_5", "qwen3_5_vl"}:
             raise ValueError(f"Unsupported model_type '{model_type}' for Qwen3.5 eval adapter.")
-        use_geometry_model = getattr(config, "use_geometry_encoder", False) or getattr(config, "use_vggt_feature", False)
+        use_cached_vggt = bool(getattr(config, "use_cached_vggt", False))
+        use_geometry_model = (
+            getattr(config, "use_geometry_encoder", False)
+            or getattr(config, "use_vggt_feature", False)
+            or use_cached_vggt
+        )
         if use_geometry_model and int(batch_size) != 1:
             raise ValueError("Qwen3.5 geometry evaluation currently requires batch_size=1.")
 
@@ -185,6 +216,30 @@ class Qwen3_5(lmms):
             ) from exc
 
         geometry_encoder_path = geometry_encoder_path or getattr(config, "geometry_encoder_path", None)
+        self.cached_vggt_store = None
+        if use_cached_vggt:
+            if not cached_vggt_manifest or not cached_vggt_data_root:
+                raise ValueError(
+                    "cached_vggt_manifest and cached_vggt_data_root are required for cached-VGGT evaluation"
+                )
+            candidate = str(getattr(config, "controlled_fusion_candidate", "")).lower()
+            if candidate not in {"a_premerger_cross_attn", "b_llm_add"}:
+                raise ValueError(f"Invalid controlled_fusion_candidate in checkpoint config: {candidate!r}")
+            dimensions = (
+                config.vision_config.hidden_size,
+                config.vision_config.out_hidden_size,
+                config.text_config.hidden_size,
+                config.text_config.num_hidden_layers,
+            )
+            if dimensions != (1024, 2560, 2560, 32):
+                raise ValueError(f"Cached controlled evaluation requires Qwen3.5-4B, got dimensions {dimensions}")
+            required_layers = [23] if candidate == "a_premerger_cross_attn" else [11, 17, 23]
+            self.cached_vggt_store = CachedVGGTStore(
+                cached_vggt_manifest,
+                required_layers=required_layers,
+                num_frames=max_num_frames,
+                verify_sha256=cached_vggt_verify_sha256,
+            )
         if use_geometry_model:
             from qwen_vl.model.modeling_qwen3_5 import Qwen3_5ForConditionalGenerationWithGeometry
 
@@ -197,13 +252,20 @@ class Qwen3_5(lmms):
             "torch_dtype": torch.bfloat16,
             "device_map": self.device_map,
         }
-        if use_geometry_model:
+        if getattr(config, "use_geometry_encoder", False):
             load_kwargs["geometry_encoder_path"] = geometry_encoder_path
 
         if use_flash_attention_2:
-            self._model = load_class.from_pretrained(pretrained, attn_implementation="flash_attention_2", **load_kwargs).eval()
+            self._model = load_class.from_pretrained(model_source, attn_implementation="flash_attention_2", **load_kwargs).eval()
         else:
-            self._model = load_class.from_pretrained(pretrained, **load_kwargs).eval()
+            self._model = load_class.from_pretrained(model_source, **load_kwargs).eval()
+
+        if adapter_path is not None:
+            from peft import PeftModel
+            from qwen_vl.model.modeling_qwen3_5 import load_qwen3_5_controlled_submodules
+
+            load_qwen3_5_controlled_submodules(self._model, adapter_path)
+            self._model = PeftModel.from_pretrained(self._model, adapter_path).eval()
 
         self.processor = AutoProcessor.from_pretrained(
             pretrained,
@@ -294,14 +356,23 @@ class Qwen3_5(lmms):
             return visual_group[0]
         return visual_group
 
-    def _sample_video_frames(self, video_path: str) -> List[Image.Image]:
+    def _sample_video_frames(self, video_path: str):
+        if self.cached_vggt_store is not None:
+            root = Path(self.cached_vggt_data_root).expanduser().resolve()
+            resolved = Path(video_path).expanduser().resolve()
+            try:
+                relative = resolved.relative_to(root).as_posix()
+            except ValueError as exc:
+                raise ValueError(f"Evaluation video {resolved} is outside cached_vggt_data_root {root}") from exc
+            sample = self.cached_vggt_store.load(self.cached_vggt_dataset, relative, str(root))
+            return sample.images, sample
         if self.use_custom_video_loader:
             return read_video_pyav_pil(
                 video_path,
                 num_frm=self.max_num_frames,
                 fps=self.fps,
                 max_image_size=self.max_image_size,
-            )
+            ), None
 
         vr = decord.VideoReader(video_path)
         frame_count = len(vr)
@@ -309,14 +380,15 @@ class Qwen3_5(lmms):
             indices = np.arange(frame_count)
         else:
             indices = np.linspace(0, frame_count - 1, self.max_num_frames).astype(int)
-        return [Image.fromarray(vr[i].asnumpy()).convert("RGB") for i in indices]
+        return [Image.fromarray(vr[i].asnumpy()).convert("RGB") for i in indices], None
 
     def _build_sample(self, context, visual):
         sample_images = []
+        cached_vggt_sample = None
         user_content = []
 
         if isinstance(visual, str) and visual.endswith((".mp4", ".avi", ".mov", ".mkv", ".webm")):
-            frames = self._sample_video_frames(visual)
+            frames, cached_vggt_sample = self._sample_video_frames(visual)
             for idx, frame in enumerate(frames):
                 if self.add_frame_index:
                     user_content.append({"type": "text", "text": f"Frame-{idx}: "})
@@ -351,7 +423,7 @@ class Qwen3_5(lmms):
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": user_content},
         ]
-        return message, sample_images
+        return message, sample_images, cached_vggt_sample
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         res = []
@@ -381,11 +453,13 @@ class Qwen3_5(lmms):
 
             messages = []
             sample_images = []
+            cached_vggt_samples = []
             for context, raw_visual in zip(contexts, batched_visuals):
                 visual = self._normalize_visual(raw_visual)
-                message, images = self._build_sample(context, visual)
+                message, images, cached_vggt_sample = self._build_sample(context, visual)
                 messages.append(message)
                 sample_images.append(images)
+                cached_vggt_samples.append(cached_vggt_sample)
 
             chat_template_kwargs = {
                 "tokenize": False,
@@ -409,6 +483,14 @@ class Qwen3_5(lmms):
                     inputs["image_grid_thw"],
                 )
                 inputs["geometry_encoder_inputs"] = [torch.stack(geometry_encoder_inputs)]
+            if self.cached_vggt_store is not None:
+                if len(cached_vggt_samples) != 1 or cached_vggt_samples[0] is None:
+                    raise ValueError("Cached-VGGT evaluation requires one manifest-backed video per batch")
+                sample = cached_vggt_samples[0]
+                if int(inputs["image_grid_thw"].shape[0]) != len(sample.frame_idx):
+                    raise ValueError("Qwen processor frame count differs from cached VGGT frame count")
+                inputs["cached_vggt_features"] = [sample.features]
+                inputs["cached_vggt_frame_idx"] = [sample.frame_idx]
             preprocess_elapsed = time.perf_counter() - batch_start
 
             if self.device_map == "auto":
