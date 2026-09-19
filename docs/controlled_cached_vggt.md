@@ -74,8 +74,25 @@ LORA_ENABLE=true \
 bash scripts/train/train.sh
 ```
 
-For an implementation smoke, additionally set `--max_steps 2`, a one-scene
-dataset alias, batch size one, and a temporary output directory. Formal SFT,
-Pre-SFT probing, official/full SFT, and full VSI-Bench are deliberately outside
-this path. The external architecture-ranking metric remains validation
-`delta125` (higher is better).
+For an implementation smoke, use
+`scripts/train/smoke_controlled_cached_vggt.sh` with a one-scene dataset alias,
+batch size one, a temporary output directory, and `MAX_STEPS=1` or `2`. The
+wrapper uses SDPA, disables DeepSpeed unless explicitly requested, and performs
+an additional backward-time finite check with separate fusion and LoRA gradient
+coverage counts. That scan is smoke-only and is not enabled by the normal
+training entry point.
+
+`scripts/train/reload_controlled_cached_vggt_smoke.py` verifies direct
+checkpoint reload and short generation. For the actual evaluation adapter,
+`scripts/train/smoke_lmms_eval_cached_vggt.py` drives the repository's
+`lmms_eval.models.qwen3_5.generate_until` path on one manifest-backed video.
+Both require a local checkpoint, manifest, and media root.
+
+`scripts/train/create_synthetic_cached_vggt_smoke.py` can create a
+schema-valid sidecar solely for engineering tests when real VGGT caches are not
+present. Its output is marked `synthetic_smoke_only` and must never be used for
+scientific training, probing, ranking, or VSI-Bench reporting.
+
+Formal SFT, Pre-SFT probing, official/full SFT, and full VSI-Bench are
+deliberately outside this path. The external architecture-ranking metric
+remains validation `delta125` (higher is better).

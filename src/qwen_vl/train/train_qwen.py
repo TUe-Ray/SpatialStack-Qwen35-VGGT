@@ -70,6 +70,43 @@ def save_controlled_vggt_artifact(model, output_dir: str) -> None:
 class ControlledCheckpointTrainer(Trainer):
     """Keep fusion state beside every PEFT adapter/checkpoint."""
 
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        loss = super().training_step(model, inputs, num_items_in_batch)
+        if os.environ.get("CONTROLLED_SMOKE_VALIDATE_GRADIENTS", "0") != "1":
+            return loss
+
+        if not bool(torch.isfinite(loss.detach()).all()):
+            raise RuntimeError(f"Controlled smoke produced a non-finite loss: {loss.detach()}")
+
+        audit = {
+            "fusion": {"trainable": 0, "gradient_covered": 0},
+            "lora": {"trainable": 0, "gradient_covered": 0},
+        }
+        nonfinite = []
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            group = "fusion" if "controlled_vggt_fusion" in name else "lora" if "lora_" in name else None
+            if group is None:
+                continue
+            audit[group]["trainable"] += parameter.numel()
+            if parameter.grad is None:
+                continue
+            audit[group]["gradient_covered"] += parameter.numel()
+            if not bool(torch.isfinite(parameter.grad.detach()).all()):
+                nonfinite.append(name)
+
+        if nonfinite:
+            raise RuntimeError(f"Controlled smoke produced non-finite gradients: {nonfinite[:20]}")
+        uncovered_groups = [
+            group for group, counts in audit.items()
+            if counts["trainable"] == 0 or counts["gradient_covered"] == 0
+        ]
+        if uncovered_groups:
+            raise RuntimeError(f"Controlled smoke has no gradient coverage for groups: {uncovered_groups}")
+        print(f"Controlled smoke finite-gradient audit: {json.dumps(audit, sort_keys=True)}")
+        return loss
+
     def _save(self, output_dir=None, state_dict=None):
         output_dir = output_dir or self.args.output_dir
         super()._save(output_dir=output_dir, state_dict=state_dict)
@@ -425,7 +462,7 @@ def train(attn_implementation="flash_attention_2"):
         if hasattr(language_module, "print_trainable_parameters"):
             language_module.print_trainable_parameters()
         if model_args.use_cached_vggt:
-            rank0_print(f"Controlled trainable audit: {audit_controlled_trainable_parameters(model)}")
+            print(f"Controlled trainable audit: {audit_controlled_trainable_parameters(model)}")
 
     print(model.config)
     if model_args.use_geometry_encoder:
@@ -487,4 +524,4 @@ def train(attn_implementation="flash_attention_2"):
 
 
 if __name__ == "__main__":
-    train(attn_implementation="flash_attention_2")
+    train(attn_implementation=os.environ.get("ATTN_IMPLEMENTATION", "flash_attention_2"))

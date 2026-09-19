@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -93,8 +94,11 @@ SCAN2CAP = {
 }
 
 VLM3R_SCANNET = {
-    "annotation_path": "data/vlm3r/annotations/vsibench_train/merged_qa_scannet_train.json",
-    "data_path": "data/vlm3r/media",
+    "annotation_path": os.environ.get(
+        "VLM3R_SCANNET_ANNOTATION",
+        "data/vlm3r/annotations/vsibench_train/merged_qa_scannet_train.json",
+    ),
+    "data_path": os.environ.get("VLM3R_SCANNET_MEDIA_ROOT", "data/vlm3r/media"),
     "tag": "3d"
 }
 

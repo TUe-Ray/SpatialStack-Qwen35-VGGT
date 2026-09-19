@@ -80,6 +80,12 @@ mkdir -p "$OUTPUT_DIR"
 LR="${LR:-1e-5}"
 MAX_STEPS="${MAX_STEPS:--1}"
 SAVE_STEPS="${SAVE_STEPS:-1000}"
+MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-12800}"
+MAX_PIXELS="${MAX_PIXELS:-$((576*28*28))}"
+MIN_PIXELS="${MIN_PIXELS:-$((16*28*28))}"
+DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
+DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG-scripts/zero2_opt.json}"
+REMOVE_UNUSED_COLUMNS="${REMOVE_UNUSED_COLUMNS:-false}"
 total_batch_size="${TOTAL_BATCH_SIZE:-64}"
 
 if [ "$WORLD_SIZE" -gt 0 ]; then
@@ -126,10 +132,10 @@ train_args=(
          --mm_projector_lr 1e-5
          --vision_tower_lr 1e-6
          --optim adamw_torch
-         --model_max_length 12800
+         --model_max_length "$MODEL_MAX_LENGTH"
          --data_flatten "$DATA_FLATTEN"
-         --max_pixels $((576*28*28))
-         --min_pixels $((16*28*28))
+         --max_pixels "$MAX_PIXELS"
+         --min_pixels "$MIN_PIXELS"
          --base_interval 2
          --video_max_frames 8
          --video_min_frames 4
@@ -143,9 +149,9 @@ train_args=(
          --logging_steps 10
          --save_steps "$SAVE_STEPS"
          --save_total_limit 10
-         --deepspeed scripts/zero2_opt.json
          --gradient_checkpointing
-         --dataloader_num_workers 4
+         --dataloader_num_workers "$DATALOADER_NUM_WORKERS"
+         --remove_unused_columns "$REMOVE_UNUSED_COLUMNS"
          --group_by_modality_length true
          --seed 0
          --report_to none
@@ -153,6 +159,10 @@ train_args=(
          --use_cached_vggt "$USE_CACHED_VGGT"
          --lora_enable "$LORA_ENABLE"
 )
+
+if [[ -n "$DEEPSPEED_CONFIG" ]]; then
+    train_args+=(--deepspeed "$DEEPSPEED_CONFIG")
+fi
 
 if [[ "${USE_CACHED_VGGT,,}" == "true" ]]; then
     if [[ "${USE_GEOMETRY_ENCODER,,}" == "true" ]]; then
