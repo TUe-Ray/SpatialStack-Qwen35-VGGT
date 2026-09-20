@@ -8,9 +8,24 @@ import torch
 from PIL import Image
 
 from qwen_vl.data.cached_vggt import CachedVGGTError, CachedVGGTStore, MANIFEST_SCHEMA
+from scripts.data.build_cached_vggt_manifest import sidecar_relative_path
 
 
 class CachedVGGTStoreTest(unittest.TestCase):
+    def test_formal_cache_path_mapping_is_exact(self):
+        self.assertEqual(
+            sidecar_relative_path(Path("scannet/videos/scene0384_00.mp4")),
+            Path("scannet/scene0384_00.pt"),
+        )
+        self.assertEqual(
+            sidecar_relative_path(Path("scannet/scene0384_00.mp4")),
+            Path("scannet/scene0384_00.pt"),
+        )
+        self.assertEqual(
+            sidecar_relative_path(Path("scannet/notvideos/scene0384_00.mp4")),
+            Path("scannet/notvideos/scene0384_00.pt"),
+        )
+
     def _fixture(self, root: Path, frame_idx=(1, 3, 7)):
         video = root / "media" / "scene"
         video.mkdir(parents=True)

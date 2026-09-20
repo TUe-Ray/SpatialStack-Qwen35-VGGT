@@ -27,6 +27,14 @@ def read_annotations(path: Path):
         return json.load(handle)
 
 
+def sidecar_relative_path(relative_video: Path) -> Path:
+    """Map an exact media-relative path to the established cache layout."""
+    parts = list(relative_video.parts)
+    if len(parts) >= 2 and parts[-2] == "videos":
+        del parts[-2]
+    return Path(*parts).with_suffix(".pt")
+
+
 def validate_sidecar(path: Path, required_layers: set[str]):
     payload = torch.load(path, map_location="cpu", weights_only=False)
     frame_idx = payload["frames"]["frame_idx"]
@@ -46,7 +54,10 @@ def validate_sidecar(path: Path, required_layers: set[str]):
         tensor = layer_map[layer]
         if tuple(tensor.shape) != (len(frame_idx), 1374, 2048) or tensor.dtype != torch.bfloat16:
             raise ValueError(f"{path}: invalid layer {layer} tensor {tuple(tensor.shape)}/{tensor.dtype}")
-    return frame_idx.tolist()
+    source_video = meta.get("source_video")
+    if not isinstance(source_video, str) or not source_video:
+        raise ValueError(f"{path}: meta.source_video must be a non-empty string")
+    return frame_idx.tolist(), source_video
 
 
 def main():
@@ -83,10 +94,10 @@ def main():
                 continue
             seen.add(key)
             media_path = (media_root / normalized).resolve()
-            sidecar_path = (sidecar_root / Path(normalized).with_suffix(".pt")).resolve()
+            sidecar_path = (sidecar_root / sidecar_relative_path(relative_video)).resolve()
             if not media_path.is_file() or not sidecar_path.is_file():
                 raise FileNotFoundError(f"Missing exact media/sidecar pair: {media_path} / {sidecar_path}")
-            frame_idx = validate_sidecar(sidecar_path, required_layers)
+            frame_idx, recorded_source_video = validate_sidecar(sidecar_path, required_layers)
             records.append(
                 {
                     "dataset": dataset,
@@ -94,6 +105,7 @@ def main():
                     "sidecar": str(sidecar_path),
                     "sha256": sha256(sidecar_path),
                     "frame_idx": frame_idx,
+                    "recorded_source_video": recorded_source_video,
                 }
             )
 
