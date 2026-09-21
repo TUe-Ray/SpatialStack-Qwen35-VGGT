@@ -34,7 +34,13 @@ def main() -> None:
     config = AutoConfig.from_pretrained(checkpoint, local_files_only=True)
     candidate = config.controlled_fusion_candidate
     layers = [23] if candidate == "a_premerger_cross_attn" else [11, 17, 23]
-    store = CachedVGGTStore(args.manifest, layers, args.num_frames, verify_sha256=True)
+    store = CachedVGGTStore(
+        args.manifest,
+        layers,
+        args.num_frames,
+        verify_sha256=True,
+        require_exact_layers=(candidate == "a_premerger_cross_attn"),
+    )
     sample = store.load(args.dataset, args.video, args.media_root)
 
     model = Qwen3_5ForConditionalGenerationWithGeometry.from_pretrained(

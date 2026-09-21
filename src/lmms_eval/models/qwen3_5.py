@@ -239,6 +239,7 @@ class Qwen3_5(lmms):
                 required_layers=required_layers,
                 num_frames=max_num_frames,
                 verify_sha256=cached_vggt_verify_sha256,
+                require_exact_layers=(candidate == "a_premerger_cross_attn"),
             )
         if use_geometry_model:
             from qwen_vl.model.modeling_qwen3_5 import Qwen3_5ForConditionalGenerationWithGeometry

@@ -45,6 +45,12 @@ Expected sidecar tensors are
 `frames.aggregated_tokens.{11,17,23}: [F,1374,2048]`. The loader removes the
 first five special tokens before tensors reach the model.
 
+Candidate A training and evaluation require an L23-only sidecar: both
+`meta.intermediate_layer_idx` and `frames.aggregated_tokens` must contain
+exactly layer 23. Build its manifest with `--layers 23 --exact-layers` and the
+L23-only cache root. Candidate B continues to accept the established
+multi-layer sidecars and selects layers 11/17/23.
+
 ## Candidates
 
 - `a_premerger_cross_attn`: layer 23 only; resize 37x37 patches to each Qwen

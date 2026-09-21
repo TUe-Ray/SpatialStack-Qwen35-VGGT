@@ -53,6 +53,7 @@ class DataArguments:
     cached_vggt_num_frames: int = field(default=32)
     cached_vggt_verify_sha256: bool = field(default=True)
     cached_vggt_layers: Optional[List[int]] = field(default=None)
+    cached_vggt_require_exact_layers: bool = field(default=False)
 
 
 @dataclass

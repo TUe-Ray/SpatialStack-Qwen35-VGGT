@@ -71,6 +71,7 @@ class CachedVGGTStore:
         required_layers: Sequence[int],
         num_frames: int,
         verify_sha256: bool = True,
+        require_exact_layers: bool = False,
     ) -> None:
         self.manifest_path = Path(manifest_path).expanduser().resolve()
         if required_layers is None:
@@ -78,6 +79,7 @@ class CachedVGGTStore:
         self.required_layers = tuple(str(layer) for layer in required_layers)
         self.num_frames = int(num_frames)
         self.verify_sha256 = bool(verify_sha256)
+        self.require_exact_layers = bool(require_exact_layers)
         self._verified_sidecars: set[Path] = set()
         if self.num_frames <= 0:
             raise ValueError("num_frames must be positive")
@@ -221,6 +223,15 @@ class CachedVGGTStore:
             raise CachedVGGTError(
                 f"meta.intermediate_layer_idx lacks required layers {self.required_layers}"
             )
+        payload_layers = {str(layer) for layer in layer_map}
+        if self.require_exact_layers:
+            expected_layers = set(self.required_layers)
+            if metadata_layers != expected_layers or payload_layers != expected_layers:
+                raise CachedVGGTError(
+                    "Exact cached layer set required: "
+                    f"expected {sorted(expected_layers)}, metadata has {sorted(metadata_layers)}, "
+                    f"payload has {sorted(payload_layers)}"
+                )
 
         if frame_idx.ndim != 1 or len(frame_idx) == 0:
             raise CachedVGGTError("frames.frame_idx must be a non-empty 1-D sequence")

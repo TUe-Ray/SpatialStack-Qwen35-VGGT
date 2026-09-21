@@ -26,14 +26,14 @@ class CachedVGGTStoreTest(unittest.TestCase):
             Path("scannet/notvideos/scene0384_00.pt"),
         )
 
-    def _fixture(self, root: Path, frame_idx=(1, 3, 7)):
+    def _fixture(self, root: Path, frame_idx=(1, 3, 7), layers=(11, 17, 23)):
         video = root / "media" / "scene"
         video.mkdir(parents=True)
         for index in range(8):
             Image.new("RGB", (2, 2), color=(index, 0, 0)).save(video / f"{index:03d}.png")
         layer_map = {
             str(layer): torch.randn(3, 1374, 2048, dtype=torch.bfloat16)
-            for layer in (11, 17, 23)
+            for layer in layers
         }
         sidecar = root / "scene.pt"
         torch.save(
@@ -49,7 +49,7 @@ class CachedVGGTStoreTest(unittest.TestCase):
                     "patch_start_idx": 5,
                     "feature_dim": 2048,
                     "token_dtype": "bfloat16",
-                    "intermediate_layer_idx": [11, 17, 23],
+                    "intermediate_layer_idx": list(layers),
                 },
             },
             sidecar,
@@ -104,6 +104,26 @@ class CachedVGGTStoreTest(unittest.TestCase):
             store = CachedVGGTStore(str(manifest), [23], num_frames=2)
             with self.assertRaises(CachedVGGTError):
                 store.load("fixture", "other/scene", str(root / "media"))
+
+    def test_exact_l23_rejects_multilayer_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _ = self._fixture(root)
+            store = CachedVGGTStore(
+                str(manifest), [23], num_frames=2, require_exact_layers=True
+            )
+            with self.assertRaisesRegex(CachedVGGTError, "Exact cached layer set required"):
+                store.load("fixture", "scene", str(root / "media"))
+
+    def test_exact_l23_accepts_l23_only_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _ = self._fixture(root, layers=(23,))
+            store = CachedVGGTStore(
+                str(manifest), [23], num_frames=2, require_exact_layers=True
+            )
+            sample = store.load("fixture", "scene", str(root / "media"))
+            self.assertEqual(set(sample.features), {"23"})
 
 
 if __name__ == "__main__":

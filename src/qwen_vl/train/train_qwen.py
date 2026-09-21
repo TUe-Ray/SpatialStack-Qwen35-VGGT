@@ -520,6 +520,9 @@ def train(attn_implementation="flash_attention_2"):
                     if model_args.controlled_fusion_candidate == "a_premerger_cross_attn"
                     else [11, 17, 23]
                 )
+                data_args.cached_vggt_require_exact_layers = (
+                    model_args.controlled_fusion_candidate == "a_premerger_cross_attn"
+                )
             elif model_args.geometry_encoder_path is None:
                 raise ValueError("geometry_encoder_path is required when use_geometry_encoder is true")
 

@@ -265,6 +265,7 @@ class LazySupervisedDataset(Dataset):
                 required_layers=data_args.cached_vggt_layers,
                 num_frames=data_args.cached_vggt_num_frames,
                 verify_sha256=data_args.cached_vggt_verify_sha256,
+                require_exact_layers=data_args.cached_vggt_require_exact_layers,
             )
 
     def __len__(self):
