@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Sequence
@@ -58,6 +59,7 @@ class CachedVGGTSample:
     frame_idx: torch.LongTensor
     features: Dict[str, torch.Tensor]
     sidecar_path: str
+    profile_timings: Dict[str, float] | None = None
 
 
 class CachedVGGTStore:
@@ -166,12 +168,16 @@ class CachedVGGTStore:
         return [Image.fromarray(frame).convert("RGB") for frame in decoded]
 
     def load(self, dataset: str, video: str, data_root: str) -> CachedVGGTSample:
+        profile_enabled = os.environ.get("CONTROLLED_PROFILE", "0") == "1"
+        load_started = time.perf_counter()
         key = sample_key(dataset, video)
         if key not in self.records:
             raise CachedVGGTError(f"No exact cached VGGT manifest record for {key}")
         record = self.records[key]
         sidecar_path = self._resolve_sidecar(record)
+        resolved_at = time.perf_counter()
         sidecar = torch.load(sidecar_path, map_location="cpu", weights_only=False)
+        deserialized_at = time.perf_counter()
         try:
             raw_frame_idx = sidecar["frames"]["frame_idx"]
             layer_map = sidecar["frames"]["aggregated_tokens"]
@@ -252,8 +258,10 @@ class CachedVGGTStore:
             # Special/register/camera tokens are removed at this provenance boundary.
             features[layer] = tensor.index_select(0, positions)[:, VGGT_SPECIAL_TOKENS:].contiguous()
 
+        validated_at = time.perf_counter()
         video_path = Path(data_root).expanduser() / _normalized_relative_path(video)
         images = self._read_exact_frames(video_path.resolve(), chosen_ids)
+        decoded_at = time.perf_counter()
         if len(images) != len(chosen_ids):
             raise CachedVGGTError("RGB/VGGT frame count mismatch after exact selection")
         return CachedVGGTSample(
@@ -262,6 +270,17 @@ class CachedVGGTStore:
             frame_idx=chosen_ids,
             features=features,
             sidecar_path=str(sidecar_path),
+            profile_timings=(
+                {
+                    "manifest_resolve_sha_sec": resolved_at - load_started,
+                    "sidecar_deserialize_sec": deserialized_at - resolved_at,
+                    "sidecar_validate_select_sec": validated_at - deserialized_at,
+                    "rgb_decode_sec": decoded_at - validated_at,
+                    "cached_vggt_total_sec": decoded_at - load_started,
+                }
+                if profile_enabled
+                else None
+            ),
         )
 
 

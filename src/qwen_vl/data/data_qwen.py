@@ -459,6 +459,9 @@ class LazySupervisedDataset(Dataset):
         return images
 
     def _get_item(self, i) -> Dict[str, torch.Tensor]:
+        profile_enabled = os.environ.get("CONTROLLED_PROFILE", "0") == "1"
+        item_started = time.perf_counter()
+        profile_timings = {}
         sources = copy.deepcopy(self.list_data_dict[i])
         if isinstance(i, int):
             sources = [sources]
@@ -474,6 +477,8 @@ class LazySupervisedDataset(Dataset):
                     video=sources[0]["video"],
                     data_root=sources[0]["data_path"],
                 )
+                if cached_vggt_sample.profile_timings is not None:
+                    profile_timings.update(cached_vggt_sample.profile_timings)
                 sources[0]["images"] = cached_vggt_sample.images
             else:
                 sources[0]["images"] = self.read_video_images(sources[0])
@@ -523,6 +528,7 @@ class LazySupervisedDataset(Dataset):
                 self.draw_visual_marks(image_file, sources[0].get("spar_info", None))
 
                 image, grid_thw, geometry_encoder_inputs = [], [], []
+                rgb_preprocess_started = time.perf_counter()
                 for file in image_file:
                     ret = prepare_image_inputs(
                         file,
@@ -534,6 +540,8 @@ class LazySupervisedDataset(Dataset):
                     if ret["geometry_encoder_inputs"] is not None:
                         geometry_encoder_inputs.append(ret["geometry_encoder_inputs"])
                     grid_thw.append(ret["image_grid_thw"])
+                if profile_enabled:
+                    profile_timings["rgb_preprocess_sec"] = time.perf_counter() - rgb_preprocess_started
             else:
                 raise NotImplementedError
 
@@ -637,6 +645,9 @@ class LazySupervisedDataset(Dataset):
             data_dict["video_grid_thw"] = grid_thw
         
         data_dict["tag"] = self.list_data_dict[i].get("tag", "2d")
+        if profile_enabled:
+            profile_timings["input_prepare_total_sec"] = time.perf_counter() - item_started
+            data_dict["_controlled_profile_timings"] = profile_timings
         return data_dict
 
 
@@ -748,6 +759,10 @@ class DataCollatorForSupervisedDataset(object):
                 raise ValueError("A batch may not mix cached-VGGT and non-cached samples")
             batch["cached_vggt_features"] = [instance["cached_vggt_features"] for instance in instances]
             batch["cached_vggt_frame_idx"] = [instance["cached_vggt_frame_idx"] for instance in instances]
+        if "_controlled_profile_timings" in instances[0]:
+            batch["_controlled_profile_timings"] = [
+                instance["_controlled_profile_timings"] for instance in instances
+            ]
         return batch
 
 

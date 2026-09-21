@@ -24,6 +24,7 @@ import json
 from typing import Dict
 import shutil
 import sys
+import time
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent.parent
@@ -70,8 +71,39 @@ def save_controlled_vggt_artifact(model, output_dir: str) -> None:
 class ControlledCheckpointTrainer(Trainer):
     """Keep fusion state beside every PEFT adapter/checkpoint."""
 
+    def __init__(self, *args, **kwargs):
+        self._profile_enabled = os.environ.get("CONTROLLED_PROFILE", "0") == "1"
+        self._profile_microsteps = []
+        self._profile_data_wait_sec = 0.0
+        self._profile_last_h2d_sec = 0.0
+        self._profile_last_forward_sec = 0.0
+        super().__init__(*args, **kwargs)
+        if self._profile_enabled:
+            self.add_callback(ControlledProfileCallback(self))
+
     def training_step(self, model, inputs, num_items_in_batch=None):
+        profile_timings = inputs.pop("_controlled_profile_timings", None)
+        if self._profile_enabled:
+            torch.cuda.synchronize()
+            started = time.perf_counter()
+            self._profile_last_h2d_sec = 0.0
+            self._profile_last_forward_sec = 0.0
         loss = super().training_step(model, inputs, num_items_in_batch)
+        if self._profile_enabled:
+            torch.cuda.synchronize()
+            train_sec = time.perf_counter() - started
+            self._profile_microsteps.append(
+                {
+                    "h2d_sec": self._profile_last_h2d_sec,
+                    "forward_sec": self._profile_last_forward_sec,
+                    "backward_sec": max(
+                        0.0,
+                        train_sec - self._profile_last_h2d_sec - self._profile_last_forward_sec,
+                    ),
+                    "train_sec": train_sec,
+                    "input": profile_timings or [],
+                }
+            )
         if os.environ.get("CONTROLLED_SMOKE_VALIDATE_GRADIENTS", "0") != "1":
             return loss
 
@@ -107,11 +139,104 @@ class ControlledCheckpointTrainer(Trainer):
         print(f"Controlled smoke finite-gradient audit: {json.dumps(audit, sort_keys=True)}")
         return loss
 
+    def get_batch_samples(self, epoch_iterator, num_batches, device):
+        if not self._profile_enabled:
+            return super().get_batch_samples(epoch_iterator, num_batches, device)
+        started = time.perf_counter()
+        result = super().get_batch_samples(epoch_iterator, num_batches, device)
+        self._profile_data_wait_sec = time.perf_counter() - started
+        return result
+
+    def _prepare_inputs(self, inputs):
+        if not self._profile_enabled:
+            return super()._prepare_inputs(inputs)
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        result = super()._prepare_inputs(inputs)
+        torch.cuda.synchronize()
+        self._profile_last_h2d_sec = time.perf_counter() - started
+        return result
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        if not self._profile_enabled:
+            return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        result = super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+        torch.cuda.synchronize()
+        self._profile_last_forward_sec = time.perf_counter() - started
+        return result
+
     def _save(self, output_dir=None, state_dict=None):
         output_dir = output_dir or self.args.output_dir
         super()._save(output_dir=output_dir, state_dict=state_dict)
         if self.args.should_save:
             save_controlled_vggt_artifact(self.model, output_dir)
+
+
+class ControlledProfileCallback(transformers.TrainerCallback):
+    """Emit compact JSON timings only when CONTROLLED_PROFILE=1."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.step_started = None
+        self.optimizer_started = None
+        self.optimizer_sec = 0.0
+
+    @staticmethod
+    def _rank():
+        return int(os.environ.get("RANK", "0"))
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        torch.cuda.reset_peak_memory_stats()
+        if self._rank() == 0:
+            print("CONTROLLED_PROFILE_CONFIG " + json.dumps({
+                "world_size": int(os.environ.get("WORLD_SIZE", "1")),
+                "gradient_accumulation_steps": args.gradient_accumulation_steps,
+                "per_device_train_batch_size": args.per_device_train_batch_size,
+                "bf16": args.bf16,
+                "tf32": args.tf32,
+                "dataloader_num_workers": args.dataloader_num_workers,
+                "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+            }, sort_keys=True), flush=True)
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        torch.cuda.synchronize()
+        self.step_started = time.perf_counter()
+        self.optimizer_sec = 0.0
+        self.owner._profile_microsteps = []
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        torch.cuda.synchronize()
+        self.optimizer_started = time.perf_counter()
+
+    def on_optimizer_step(self, args, state, control, **kwargs):
+        torch.cuda.synchronize()
+        if self.optimizer_started is not None:
+            self.optimizer_sec = time.perf_counter() - self.optimizer_started
+
+    def on_step_end(self, args, state, control, **kwargs):
+        torch.cuda.synchronize()
+        compute_sec = time.perf_counter() - self.step_started
+        if self._rank() == 0:
+            record = {
+                "optimizer_step": state.global_step,
+                "data_wait_sec": self.owner._profile_data_wait_sec,
+                "compute_sec": compute_sec,
+                "total_step_sec": self.owner._profile_data_wait_sec + compute_sec,
+                "optimizer_sec": self.optimizer_sec,
+                "microsteps": self.owner._profile_microsteps,
+                "peak_vram_bytes": torch.cuda.max_memory_allocated(),
+            }
+            print("CONTROLLED_PROFILE_STEP " + json.dumps(record, sort_keys=True), flush=True)
+
+    def on_train_end(self, args, state, control, **kwargs):
+        torch.cuda.synchronize()
+        print("CONTROLLED_PROFILE_DEVICE " + json.dumps({
+            "rank": self._rank(),
+            "optimizer_steps": state.global_step,
+            "peak_vram_bytes": torch.cuda.max_memory_allocated(),
+        }, sort_keys=True), flush=True)
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -489,6 +614,9 @@ def train(attn_implementation="flash_attention_2"):
         trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train()
+    if os.environ.get("CONTROLLED_PROFILE_SKIP_SAVE", "0") == "1":
+        rank0_print("CONTROLLED_PROFILE_SKIP_SAVE=1: skipping all profiling checkpoint artifacts")
+        return
     trainer.save_state()
     if getattr(data_args, "processor", None) is not None:
         data_args.processor.save_pretrained(training_args.output_dir)
