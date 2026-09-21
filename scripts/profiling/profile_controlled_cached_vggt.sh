@@ -21,6 +21,9 @@ export MAX_STEPS="${MAX_STEPS:-50}"
 export SAVE_STEPS=1000000
 export TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-4}"
 export DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
+# The validated Snellius environment does not include DeepSpeed. Keep the
+# ordinary DDP/AdamW path unless a caller explicitly supplies a config.
+export DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-}"
 export CONTROLLED_PROFILE=1
 export CONTROLLED_PROFILE_SKIP_SAVE=1
 
