@@ -98,19 +98,34 @@ VLM3R_SCANNET = {
         "VLM3R_SCANNET_ANNOTATION",
         "data/vlm3r/annotations/vsibench_train/merged_qa_scannet_train.json",
     ),
-    "data_path": os.environ.get("VLM3R_SCANNET_MEDIA_ROOT", "data/vlm3r/media"),
+    "data_path": os.environ.get(
+        "VLM3R_SCANNET_MEDIA_ROOT",
+        os.environ.get("VLM3R_MEDIA_ROOT", "data/vlm3r/media"),
+    ),
     "tag": "3d"
 }
 
 VLM3R_SCANNETPP = {
-    "annotation_path": "data/vlm3r/annotations/vsibench_train/merged_qa_scannetpp_train.json",
-    "data_path": "data/vlm3r/media",
+    "annotation_path": os.environ.get(
+        "VLM3R_SCANNETPP_ANNOTATION",
+        "data/vlm3r/annotations/vsibench_train/merged_qa_scannetpp_train.json",
+    ),
+    "data_path": os.environ.get(
+        "VLM3R_SCANNETPP_MEDIA_ROOT",
+        os.environ.get("VLM3R_MEDIA_ROOT", "data/vlm3r/media"),
+    ),
     "tag": "3d"
 }
 
 VLM3R_ROUTEPLAN = {
-    "annotation_path": "data/vlm3r/annotations/vsibench_train/merged_qa_route_plan_train.json",
-    "data_path": "data/vlm3r/media",
+    "annotation_path": os.environ.get(
+        "VLM3R_ROUTEPLAN_ANNOTATION",
+        "data/vlm3r/annotations/vsibench_train/merged_qa_route_plan_train.json",
+    ),
+    "data_path": os.environ.get(
+        "VLM3R_ROUTEPLAN_MEDIA_ROOT",
+        os.environ.get("VLM3R_MEDIA_ROOT", "data/vlm3r/media"),
+    ),
     "tag": "3d"
 }
 
@@ -133,6 +148,8 @@ data_dict = {
     "spar_234k": SPAR_234K,
     "llava_hound_64k": LLAVA_HOUND_64K,
     "vlm3r_scannet": VLM3R_SCANNET,
+    "vlm3r_scannetpp": VLM3R_SCANNETPP,
+    "vlm3r_routeplan": VLM3R_ROUTEPLAN,
     "vsi_appr_order": VSI_APPR_ORDER,
 }
 

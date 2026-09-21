@@ -245,6 +245,15 @@ class LazySupervisedDataset(Dataset):
             list_data_dict += annotations
 
         print(f"Total training samples: {len(list_data_dict)}")
+        expected_train_samples = getattr(data_args, "expected_train_samples", None)
+        if (
+            expected_train_samples is not None
+            and len(list_data_dict) != expected_train_samples
+        ):
+            raise ValueError(
+                "Training sample count mismatch: "
+                f"loaded {len(list_data_dict)}, expected {expected_train_samples}"
+            )
 
         random.shuffle(list_data_dict)  # Randomly shuffle the data for training
 

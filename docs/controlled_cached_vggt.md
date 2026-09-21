@@ -99,6 +99,37 @@ schema-valid sidecar solely for engineering tests when real VGGT caches are not
 present. Its output is marked `synthetic_smoke_only` and must never be used for
 scientific training, probing, ranking, or VSI-Bench reporting.
 
-Formal SFT, Pre-SFT probing, official/full SFT, and full VSI-Bench are
-deliberately outside this path. The external architecture-ranking metric
-remains validation `delta125` (higher is better).
+No formal SFT, pre-SFT probe, or full VSI-Bench evaluation was launched while
+implementing and smoke-validating this path. The external
+architecture-ranking metric remains validation `delta125` (higher is better).
+
+## SpatialFocus-equivalent formal SFT controls
+
+`scripts/train/train_controlled_cached_vggt_formal.sh` is the guarded launch
+wrapper for the eventual full comparison. It fixes the training mixture to
+the three un-subsampled SpatialFocus annotations:
+
+| Alias | Annotation | QA samples |
+|---|---|---:|
+| `vlm3r_scannet` | `merged_qa_scannet_train.json` | 51,779 |
+| `vlm3r_scannetpp` | `merged_qa_scannetpp_train.json` | 151,775 |
+| `vlm3r_routeplan` | `merged_qa_route_plan_train.json` | 4,104 |
+| **Total** | | **207,658** |
+
+The wrapper also fixes one epoch, 32 cached frames, effective global batch
+128, and checkpoint interval 100 optimizer steps. It retains 20 checkpoints,
+enough for all 16 periodic saves in the 1,623-step epoch. On 4 nodes with 4
+GPUs per node and microbatch one, gradient accumulation is 8.
+
+Before starting `torchrun`, the wrapper verifies the three individual counts
+and canonical annotation SHA256 identities, the total count, every unique RGB
+path, exact dataset/video coverage in the cached-VGGT manifest, 32 strictly
+increasing manifest frame IDs, sidecar existence, and that every selected
+sidecar is under the candidate-specific cache root. Candidate A defaults to
+the L23-only root; Candidate B defaults to the L11/L17/L23 root. Any mismatch
+stops before model loading.
+
+Required launch-specific variables are `MODEL_PATH`, `OUTPUT_DIR`,
+`CONTROLLED_FUSION_CANDIDATE`, and `CACHED_VGGT_MANIFEST`. The annotation,
+media, and sidecar roots may be relocated through the documented environment
+variables in the wrapper without changing the fixed aliases or sample counts.

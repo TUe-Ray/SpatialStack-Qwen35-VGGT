@@ -80,6 +80,9 @@ mkdir -p "$OUTPUT_DIR"
 LR="${LR:-1e-5}"
 MAX_STEPS="${MAX_STEPS:--1}"
 SAVE_STEPS="${SAVE_STEPS:-1000}"
+SAVE_STRATEGY="${SAVE_STRATEGY:-steps}"
+SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-10}"
+NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-1}"
 MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-12800}"
 MAX_PIXELS="${MAX_PIXELS:-$((576*28*28))}"
 MIN_PIXELS="${MIN_PIXELS:-$((16*28*28))}"
@@ -87,8 +90,13 @@ DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG-scripts/zero2_opt.json}"
 REMOVE_UNUSED_COLUMNS="${REMOVE_UNUSED_COLUMNS:-false}"
 total_batch_size="${TOTAL_BATCH_SIZE:-64}"
+EXPECTED_TRAIN_SAMPLES="${EXPECTED_TRAIN_SAMPLES:-}"
 
 if [ "$WORLD_SIZE" -gt 0 ]; then
+    if (( total_batch_size % WORLD_SIZE != 0 )); then
+        echo ">>>>> TOTAL_BATCH_SIZE=$total_batch_size must be divisible by WORLD_SIZE=$WORLD_SIZE" >&2
+        exit 2
+    fi
     GRADIENT_ACCUMULATION_STEPS=$(( total_batch_size / WORLD_SIZE ))
 else
     GRADIENT_ACCUMULATION_STEPS=$total_batch_size
@@ -97,7 +105,11 @@ if [ "$GRADIENT_ACCUMULATION_STEPS" -le 0 ]; then
     echo ">>>>> gradient accumulation would be <1; forcing to 1 (total_batch_size=$total_batch_size, world_size=$WORLD_SIZE)"
     GRADIENT_ACCUMULATION_STEPS=1
 fi
+effective_global_batch=$((NPROC_PER_NODE * NNODES * GRADIENT_ACCUMULATION_STEPS))
+echo ">>>>> world size = $WORLD_SIZE"
+echo ">>>>> per-device batch = 1"
 echo ">>>>> grad accum = $GRADIENT_ACCUMULATION_STEPS"
+echo ">>>>> effective global batch = $effective_global_batch"
 
 # ======================
 # Model Configuration
@@ -141,14 +153,15 @@ train_args=(
          --video_min_frames 4
          --video_max_frame_pixels $((1664*28*28))
          --video_min_frame_pixels $((256*28*28))
-         --num_train_epochs 1
+         --num_train_epochs "$NUM_TRAIN_EPOCHS"
          --max_steps "$MAX_STEPS"
          --warmup_ratio 0.03
          --lr_scheduler_type cosine
          --weight_decay 0.01
          --logging_steps 10
+         --save_strategy "$SAVE_STRATEGY"
          --save_steps "$SAVE_STEPS"
-         --save_total_limit 10
+         --save_total_limit "$SAVE_TOTAL_LIMIT"
          --gradient_checkpointing
          --dataloader_num_workers "$DATALOADER_NUM_WORKERS"
          --remove_unused_columns "$REMOVE_UNUSED_COLUMNS"
@@ -159,6 +172,10 @@ train_args=(
          --use_cached_vggt "$USE_CACHED_VGGT"
          --lora_enable "$LORA_ENABLE"
 )
+
+if [[ -n "$EXPECTED_TRAIN_SAMPLES" ]]; then
+    train_args+=(--expected_train_samples "$EXPECTED_TRAIN_SAMPLES")
+fi
 
 if [[ -n "$DEEPSPEED_CONFIG" ]]; then
     train_args+=(--deepspeed "$DEEPSPEED_CONFIG")
