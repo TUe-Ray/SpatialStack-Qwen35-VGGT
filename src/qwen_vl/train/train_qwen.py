@@ -182,6 +182,8 @@ class ControlledProfileCallback(transformers.TrainerCallback):
         self.step_started = None
         self.optimizer_started = None
         self.optimizer_sec = 0.0
+        self.comm_profiler = None
+        self.save_started = None
 
     @staticmethod
     def _rank():
@@ -205,6 +207,15 @@ class ControlledProfileCallback(transformers.TrainerCallback):
         self.step_started = time.perf_counter()
         self.optimizer_sec = 0.0
         self.owner._profile_microsteps = []
+        comm_step = int(os.environ.get("CONTROLLED_PROFILE_COMM_STEP", "0"))
+        if self._rank() == 0 and comm_step == state.global_step + 1:
+            self.comm_profiler = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=False,
+                profile_memory=False,
+                with_stack=False,
+            )
+            self.comm_profiler.start()
 
     def on_pre_optimizer_step(self, args, state, control, **kwargs):
         torch.cuda.synchronize()
@@ -218,6 +229,25 @@ class ControlledProfileCallback(transformers.TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):
         torch.cuda.synchronize()
         compute_sec = time.perf_counter() - self.step_started
+        if self.comm_profiler is not None:
+            self.comm_profiler.stop()
+            events = []
+            for event in self.comm_profiler.key_averages():
+                key = event.key.lower()
+                if any(term in key for term in ("nccl", "all_reduce", "all_gather", "reduce_scatter", "broadcast")):
+                    events.append({
+                        "name": event.key,
+                        "count": event.count,
+                        "device_sec": getattr(event, "device_time_total", 0.0) / 1_000_000,
+                        "cpu_sec": event.self_cpu_time_total / 1_000_000,
+                    })
+            print("CONTROLLED_PROFILE_COMM " + json.dumps({
+                "rank": self._rank(),
+                "optimizer_step": state.global_step,
+                "events": sorted(events, key=lambda event: event["device_sec"], reverse=True)[:20],
+                "note": "sum of rank-0 device event durations; collective/compute overlap is possible",
+            }, sort_keys=True), flush=True)
+            self.comm_profiler = None
         if self._rank() == 0:
             record = {
                 "optimizer_step": state.global_step,
@@ -233,6 +263,32 @@ class ControlledProfileCallback(transformers.TrainerCallback):
                 "peak_vram_reserved_bytes": torch.cuda.max_memory_reserved(),
             }
             print("CONTROLLED_PROFILE_STEP " + json.dumps(record, sort_keys=True), flush=True)
+        else:
+            print("CONTROLLED_PROFILE_RANK_STEP " + json.dumps({
+                "rank": self._rank(),
+                "optimizer_step": state.global_step,
+                "data_wait_sec": self.owner._profile_data_wait_sec,
+                "compute_sec": compute_sec,
+                "peak_vram_bytes": torch.cuda.max_memory_allocated(),
+            }, sort_keys=True), flush=True)
+
+        save_at = int(os.environ.get("CONTROLLED_PROFILE_SAVE_AT_STEP", "0"))
+        stop_after = int(os.environ.get("CONTROLLED_PROFILE_STOP_AFTER_STEP", "0"))
+        if save_at and state.global_step == save_at:
+            control.should_save = True
+            self.save_started = time.perf_counter()
+        if stop_after and state.global_step >= stop_after:
+            control.should_training_stop = True
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        if self.save_started is not None:
+            print("CONTROLLED_PROFILE_SAVE " + json.dumps({
+                "rank": self._rank(),
+                "optimizer_step": state.global_step,
+                "elapsed_sec": time.perf_counter() - self.save_started,
+            }, sort_keys=True), flush=True)
+            self.save_started = None
 
     def on_train_end(self, args, state, control, **kwargs):
         torch.cuda.synchronize()
