@@ -224,9 +224,13 @@ class ControlledProfileCallback(transformers.TrainerCallback):
                 "data_wait_sec": self.owner._profile_data_wait_sec,
                 "compute_sec": compute_sec,
                 "total_step_sec": self.owner._profile_data_wait_sec + compute_sec,
-                "optimizer_sec": self.optimizer_sec,
+                # DeepSpeed performs its optimizer work during backward(); the
+                # Trainer optimizer callbacks cannot time it separately.
+                "optimizer_sec": None if args.deepspeed else self.optimizer_sec,
+                "backward_includes_optimizer": bool(args.deepspeed),
                 "microsteps": self.owner._profile_microsteps,
                 "peak_vram_bytes": torch.cuda.max_memory_allocated(),
+                "peak_vram_reserved_bytes": torch.cuda.max_memory_reserved(),
             }
             print("CONTROLLED_PROFILE_STEP " + json.dumps(record, sort_keys=True), flush=True)
 
@@ -236,6 +240,7 @@ class ControlledProfileCallback(transformers.TrainerCallback):
             "rank": self._rank(),
             "optimizer_steps": state.global_step,
             "peak_vram_bytes": torch.cuda.max_memory_allocated(),
+            "peak_vram_reserved_bytes": torch.cuda.max_memory_reserved(),
         }, sort_keys=True), flush=True)
 
 
@@ -530,6 +535,7 @@ def train(attn_implementation="flash_attention_2"):
                 pretrained_model_name_or_path=model_args.model_name_or_path,
                 config=config,
                 cache_dir=training_args.cache_dir,
+                attn_implementation=attn_implementation,
                 torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
             )
             if model_args.use_geometry_encoder:
@@ -539,6 +545,7 @@ def train(attn_implementation="flash_attention_2"):
             model = Qwen3_5ForConditionalGeneration.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
+                attn_implementation=attn_implementation,
                 torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
             )
         processor = AutoProcessor.from_pretrained(

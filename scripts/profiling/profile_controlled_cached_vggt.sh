@@ -17,14 +17,25 @@ export USE_CACHED_VGGT=true
 export TUNE_MM_LLM=false
 export LORA_ENABLE=true
 export CACHED_VGGT_NUM_FRAMES=32
-export MAX_STEPS="${MAX_STEPS:-50}"
+export MAX_STEPS="${MAX_STEPS:-20}"
 export SAVE_STEPS=1000000
-export TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-4}"
+export TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-32}"
 export DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
-# The validated Snellius environment does not include DeepSpeed. Keep the
-# ordinary DDP/AdamW path unless a caller explicitly supplies a config.
-export DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-}"
+export DATALOADER_DROP_LAST=true
+export VIDEO_MAX_FRAMES=32
+export VIDEO_MIN_FRAMES=32
+export SEED=42
+export DATA_SEED=42
+export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
+export DDP_FIND_UNUSED_PARAMETERS=false
+export DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero2_opt.json}"
 export CONTROLLED_PROFILE=1
 export CONTROLLED_PROFILE_SKIP_SAVE=1
+
+python scripts/train/validate_qwen35_runtime.py \
+    --attention-implementation "$ATTN_IMPLEMENTATION" \
+    --require-fast-linear-attention \
+    --deepspeed-config "$DEEPSPEED_CONFIG" \
+    --require-cuda
 
 exec bash scripts/train/train.sh

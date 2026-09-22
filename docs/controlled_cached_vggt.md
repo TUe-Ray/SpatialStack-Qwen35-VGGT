@@ -118,8 +118,12 @@ the three un-subsampled SpatialFocus annotations:
 
 The wrapper also fixes one epoch, 32 cached frames, effective global batch
 128, and checkpoint interval 100 optimizer steps. It retains 20 checkpoints,
-enough for all 16 periodic saves in the 1,623-step epoch. On 4 nodes with 4
-GPUs per node and microbatch one, gradient accumulation is 8.
+enough for all 16 periodic saves in the 1,622-step epoch. This is the observed
+SpatialFocus behavior with `dataloader_drop_last=True`; the informal
+`ceil(207658 / 128) = 1623` calculation does not describe that sampler. On 4
+nodes with 4 GPUs per node and microbatch one, gradient accumulation is 8.
+The wrapper fixes both `seed` and `data_seed` to 42, matching those formal
+SpatialFocus runs.
 
 Before starting `torchrun`, the wrapper verifies the three individual counts
 and canonical annotation SHA256 identities, the total count, every unique RGB
@@ -133,3 +137,83 @@ Required launch-specific variables are `MODEL_PATH`, `OUTPUT_DIR`,
 `CONTROLLED_FUSION_CANDIDATE`, and `CACHED_VGGT_MANIFEST`. The annotation,
 media, and sidecar roots may be relocated through the documented environment
 variables in the wrapper without changing the fixed aliases or sample counts.
+
+## Qwen3.5 runtime and throughput guard
+
+`scripts/train/validate_qwen35_runtime.py` runs before a real formal launch and
+before every profiling launch. It requires the versions documented by the
+official SpatialStack Qwen3.5 setup, verifies that FlashAttention 2 imports,
+and checks that Transformers reports the Qwen3.5 gated-delta linear-attention
+fast path available through both `causal-conv1d` and
+`flash-linear-attention`. A formal ZeRO-2 launch additionally requires
+DeepSpeed 0.16.4. Missing acceleration is an error rather than a silent
+fallback to the much slower PyTorch implementation.
+
+On Snellius, `scripts/train/slurm/build_qwen35_fast_env.sbatch` builds these
+CUDA extensions on a CPU compute node into the isolated scratch overlay
+`/scratch-shared/geusdd/SpatialStackQwen35/env-fast-overlay`; it never mutates
+the previously validated base environment. The build is fixed to A100 SM80
+and deliberately uses only two parallel NVCC jobs because eight-way
+parallelism exceeded 120 GiB of host RAM in build job 26984232.
+
+The controlled wrappers also set `ddp_find_unused_parameters=False`. Both
+candidate smokes covered every intended trainable LoRA/fusion parameter, and
+PyTorch explicitly reported that the prior `True` setting found no unused
+parameters while adding an autograd-graph traversal every iteration. This
+change removes distributed bookkeeping only; it does not alter the forward,
+loss, gradients, or optimizer.
+
+The Qwen3.5 model loader explicitly forwards `ATTN_IMPLEMENTATION` (default
+`flash_attention_2`) for both the controlled and plain model paths. Earlier
+profiling did not forward this setting and the profiling environment lacked
+all of `flash_attn`, `causal-conv1d`, and `flash-linear-attention`; its epoch
+extrapolation must therefore not be treated as a formal runtime estimate.
+
+The profiling-only wrapper now defaults to the formal ZeRO-2 config, 32 exact
+frames, one sample per GPU, gradient accumulation 8 on a four-GPU node, and
+20 optimizer steps (the first 10 excluded from steady-state statistics).
+It does not save checkpoints. For a profile shorter than one data epoch,
+`scripts/profiling/select_manifest_qa.py` selects all canonical QA belonging
+to the manifest's exact video set; it does not invent or duplicate samples.
+The one-node effective batch is 32, not the four-node formal batch of 128,
+so any epoch-time projection must disclose the cross-node topology change.
+
+The scratch runtime loads the CUDA toolkit module before DeepSpeed import and
+uses PyTorch's expandable-segment allocator to avoid fragmentation at the
+32-frame A100 memory limit. The `fla_configs_a100` files pin the launch
+configurations selected by the successful Candidate A A100 autotuning run.
+Candidate B's unconstrained autotuner exhausted device memory while testing
+larger configurations; pinning these kernel launch parameters let both
+candidates complete the same 20-step ZeRO-2 profile. These files tune the
+Qwen3.5 fast-path kernels only; they do not change fusion or cache semantics.
+
+The custom Qwen3.5 decoder still builds M-RoPE from the full multimodal
+position IDs, but passes the text-axis 2-D IDs into decoder-layer attention.
+FlashAttention's packed-sequence detection cannot safely interpret the 3-D
+M-RoPE IDs as text positions. Both controlled candidates completed a
+32-frame forward/backward after this correction.
+
+## Deliberate differences from official SpatialStack
+
+The held-out experiment retains the official Qwen3.5 checkpoint, native image
+processor and visual merger, 576-patch image budget, BF16, gradient
+checkpointing, AdamW, 1e-5 learning rate, 0.01 weight decay, cosine schedule,
+0.03 warmup ratio, four loader workers, model length 12800, and ZeRO-2 config.
+The following differences are intentional experiment controls rather than
+porting discrepancies:
+
+| Setting | Official SpatialStack | Controlled held-out run | Reason |
+|---|---|---|---|
+| Frames | 4--8 sampled frames | 32 exact sidecar frame IDs | SpatialFocus control and RGB/VGGT correspondence |
+| VGGT | Online VGGT-1B | Precomputed L23-only (A) or L11/L17/L23 (B) | Required cache-first experiment |
+| Trainable LLM | Full LLM | LoRA r128/alpha256/dropout0.05 | Match controlled SpatialFocus trainable scope policy |
+| Global batch | 64 | 128 | Match prior controlled training |
+| Seed | 0 | seed/data_seed 42 | Match prior controlled sample ordering |
+| Checkpoints | Every 1000 steps | Every 100 steps | Requested experiment retention |
+| Candidate B injection | Post-decoder-block in official implementation | Pre-block L0/L1/L2 | SpatialFocus controlled-variant semantics take priority |
+| Candidate A | No matching official recipe | Pre-native-merger frame-local L23 cross-attention | SpatialFocus A-prime semantics |
+
+The official defaults do not enable TF32 or `torch.compile`, whereas the old
+SpatialFocus runs enabled both. This branch keeps the official Qwen3.5 choices
+for now; changing them is a separate common-configuration decision and must be
+applied identically to A and B after a measured smoke comparison.

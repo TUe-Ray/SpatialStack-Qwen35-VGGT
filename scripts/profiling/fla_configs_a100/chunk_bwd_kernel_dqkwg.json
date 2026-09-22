@@ -1,0 +1,10 @@
+{
+  "kernel_name": "chunk_bwd_kernel_dqkwg",
+  "triton_version": "3.6.0",
+  "default_config": {
+    "kwargs": {},
+    "num_warps": 4,
+    "num_stages": 3,
+    "num_ctas": 1
+  }
+}

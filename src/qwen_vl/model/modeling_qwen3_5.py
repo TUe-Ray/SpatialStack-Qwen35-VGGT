@@ -389,7 +389,10 @@ class Qwen3_5TextModelWithGeometry(Qwen3_5TextModel):
                 hidden_states,
                 position_embeddings=position_embeddings,
                 attention_mask=layer_mask,
-                position_ids=position_ids,
+                # M-RoPE was already materialized in position_embeddings.
+                # FlashAttention's packed-sequence detector expects 2-D IDs;
+                # passing the 3-D M-RoPE IDs can produce invalid cu_seqlens.
+                position_ids=text_position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 cache_position=cache_position,

@@ -13,6 +13,10 @@ cd "$REPO_ROOT"
 VLM3R_DATA_ROOT="${VLM3R_DATA_ROOT:-/scratch-shared/geusdd/VLM3R/data/vlm3r}"
 VLM3R_ANNOTATION_ROOT="${VLM3R_ANNOTATION_ROOT:-$VLM3R_DATA_ROOT/VLM-3R-DATA/vsibench_train}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+export PYTHONNOUSERSITE=1
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export FLA_CACHE_MODE=default
+export FLA_CONFIG_DIR="$REPO_ROOT/scripts/profiling/fla_configs_a100"
 
 export VLM3R_SCANNET_ANNOTATION="${VLM3R_SCANNET_ANNOTATION:-$VLM3R_ANNOTATION_ROOT/merged_qa_scannet_train.json}"
 export VLM3R_SCANNETPP_ANNOTATION="${VLM3R_SCANNETPP_ANNOTATION:-$VLM3R_ANNOTATION_ROOT/merged_qa_scannetpp_train.json}"
@@ -41,15 +45,34 @@ export NUM_TRAIN_EPOCHS=1
 export MAX_STEPS=-1
 export SAVE_STRATEGY=steps
 export SAVE_STEPS=100
-# One epoch has 1,623 optimizer steps, hence 16 periodic checkpoints.
+# drop_last matches the prior SpatialFocus runs: 1,622 optimizer steps and
+# therefore 16 periodic checkpoints at interval 100.
 export SAVE_TOTAL_LIMIT=20
 export CACHED_VGGT_NUM_FRAMES=32
+export VIDEO_MAX_FRAMES=32
+export VIDEO_MIN_FRAMES=32
 export USE_GEOMETRY_ENCODER=false
 export USE_CACHED_VGGT=true
 export TUNE_MM_LLM=false
 export LORA_ENABLE=true
 export DATA_FLATTEN=False
 export DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero2_opt.json}"
+export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
+# Preserve the canonical SpatialFocus sample order and last-batch behavior.
+export SEED=42
+export DATA_SEED=42
+export DATALOADER_DROP_LAST=true
+# Both candidates exercised every trainable LoRA/fusion parameter in the
+# 50-step DDP smokes. Avoid the unnecessary per-step autograd graph traversal.
+export DDP_FIND_UNUSED_PARAMETERS=false
+
+if [[ "${CHECK_ONLY:-0}" != "1" ]]; then
+    "$PYTHON_BIN" scripts/train/validate_qwen35_runtime.py \
+        --attention-implementation "$ATTN_IMPLEMENTATION" \
+        --require-fast-linear-attention \
+        --deepspeed-config "$DEEPSPEED_CONFIG" \
+        --require-cuda
+fi
 
 "$PYTHON_BIN" scripts/data/validate_controlled_sft_inputs.py \
     --dataset vlm3r_scannet "$VLM3R_SCANNET_ANNOTATION" "$VLM3R_MEDIA_ROOT" 51779 6cf0368fc34124cd9a3c60077a84704f04a0829bf9ee8296d35bb8242fd9df1e \
@@ -67,7 +90,7 @@ if (( TOTAL_BATCH_SIZE % WORLD_SIZE_PREVIEW != 0 )); then
     echo "TOTAL_BATCH_SIZE=$TOTAL_BATCH_SIZE is not divisible by WORLD_SIZE=$WORLD_SIZE_PREVIEW" >&2
     exit 2
 fi
-echo "CONTROLLED_SFT_CONFIG samples=$EXPECTED_TRAIN_SAMPLES datasets=$DATASETS global_batch=$TOTAL_BATCH_SIZE world_size=$WORLD_SIZE_PREVIEW grad_accum=$((TOTAL_BATCH_SIZE / WORLD_SIZE_PREVIEW)) optimizer_steps_per_epoch=1623 save_steps=$SAVE_STEPS"
+echo "CONTROLLED_SFT_CONFIG samples=$EXPECTED_TRAIN_SAMPLES datasets=$DATASETS global_batch=$TOTAL_BATCH_SIZE world_size=$WORLD_SIZE_PREVIEW grad_accum=$((TOTAL_BATCH_SIZE / WORLD_SIZE_PREVIEW)) optimizer_steps_per_epoch=1622 save_steps=$SAVE_STEPS seed=$SEED data_seed=$DATA_SEED drop_last=$DATALOADER_DROP_LAST attention=$ATTN_IMPLEMENTATION"
 
 if [[ "${CHECK_ONLY:-0}" == "1" ]]; then
     echo "CHECK_ONLY=1: validation complete; training was not launched"

@@ -87,8 +87,17 @@ MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-12800}"
 MAX_PIXELS="${MAX_PIXELS:-$((576*28*28))}"
 MIN_PIXELS="${MIN_PIXELS:-$((16*28*28))}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
+DATALOADER_DROP_LAST="${DATALOADER_DROP_LAST:-false}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG-scripts/zero2_opt.json}"
 REMOVE_UNUSED_COLUMNS="${REMOVE_UNUSED_COLUMNS:-false}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+SEED="${SEED:-0}"
+DATA_SEED="${DATA_SEED:-$SEED}"
+TF32="${TF32:-false}"
+VIDEO_MAX_FRAMES="${VIDEO_MAX_FRAMES:-8}"
+VIDEO_MIN_FRAMES="${VIDEO_MIN_FRAMES:-4}"
+DDP_FIND_UNUSED_PARAMETERS="${DDP_FIND_UNUSED_PARAMETERS:-}"
 total_batch_size="${TOTAL_BATCH_SIZE:-64}"
 EXPECTED_TRAIN_SAMPLES="${EXPECTED_TRAIN_SAMPLES:-}"
 
@@ -110,6 +119,9 @@ echo ">>>>> world size = $WORLD_SIZE"
 echo ">>>>> per-device batch = 1"
 echo ">>>>> grad accum = $GRADIENT_ACCUMULATION_STEPS"
 echo ">>>>> effective global batch = $effective_global_batch"
+echo ">>>>> attention implementation = $ATTN_IMPLEMENTATION"
+echo ">>>>> seed/data_seed = $SEED/$DATA_SEED"
+echo ">>>>> dataloader drop_last = $DATALOADER_DROP_LAST"
 
 # ======================
 # Model Configuration
@@ -149,8 +161,8 @@ train_args=(
          --max_pixels "$MAX_PIXELS"
          --min_pixels "$MIN_PIXELS"
          --base_interval 2
-         --video_max_frames 8
-         --video_min_frames 4
+         --video_max_frames "$VIDEO_MAX_FRAMES"
+         --video_min_frames "$VIDEO_MIN_FRAMES"
          --video_max_frame_pixels $((1664*28*28))
          --video_min_frame_pixels $((256*28*28))
          --num_train_epochs "$NUM_TRAIN_EPOCHS"
@@ -164,9 +176,12 @@ train_args=(
          --save_total_limit "$SAVE_TOTAL_LIMIT"
          --gradient_checkpointing
          --dataloader_num_workers "$DATALOADER_NUM_WORKERS"
+         --dataloader_drop_last "$DATALOADER_DROP_LAST"
          --remove_unused_columns "$REMOVE_UNUSED_COLUMNS"
          --group_by_modality_length true
-         --seed 0
+         --seed "$SEED"
+         --data_seed "$DATA_SEED"
+         --tf32 "$TF32"
          --report_to none
          --use_geometry_encoder "$USE_GEOMETRY_ENCODER"
          --use_cached_vggt "$USE_CACHED_VGGT"
@@ -175,6 +190,10 @@ train_args=(
 
 if [[ -n "$EXPECTED_TRAIN_SAMPLES" ]]; then
     train_args+=(--expected_train_samples "$EXPECTED_TRAIN_SAMPLES")
+fi
+
+if [[ -n "$DDP_FIND_UNUSED_PARAMETERS" ]]; then
+    train_args+=(--ddp_find_unused_parameters "$DDP_FIND_UNUSED_PARAMETERS")
 fi
 
 if [[ -n "$DEEPSPEED_CONFIG" ]]; then
@@ -212,7 +231,7 @@ if [[ "${USE_GEOMETRY_ENCODER,,}" == "true" ]]; then
     fi
 fi
 
-torchrun --nproc_per_node=$NPROC_PER_NODE \
+ATTN_IMPLEMENTATION="$ATTN_IMPLEMENTATION" "$PYTHON_BIN" -m torch.distributed.run --nproc_per_node=$NPROC_PER_NODE \
          --nnodes=$NNODES \
          --node_rank=$NODE_RANK \
          --master_addr=$MASTER_ADDR \
