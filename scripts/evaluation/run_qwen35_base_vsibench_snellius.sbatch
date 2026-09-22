@@ -84,17 +84,12 @@ PY
 echo "BASE_VSI_CONFIG job=$SLURM_JOB_ID code=$EXPECTED_GIT_COMMIT model=$MODEL_PATH samples=5130 frames=32 gpus=4 output=$RUN_ROOT"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-"$ENV_ROOT/bin/python" -m lmms_eval \
-    --model "$MODEL_IMPL" \
-    --model_args "$MODEL_ARGS_BASE" \
-    --tasks "$BENCHMARKS" \
-    --batch_size 1 \
-    --limit 1 \
-    --output_path "$RUN_ROOT/smoke" \
-    --verbosity INFO \
-    --log_samples
+export LIMIT=4
+export OUTPUT_PATH="$RUN_ROOT/smoke"
+bash scripts/evaluation/eval.sh
 echo "BASE_VSI_SMOKE status=ok"
 
+unset LIMIT
 export OUTPUT_PATH="$RUN_ROOT/full"
 bash scripts/evaluation/eval.sh
 echo "BASE_VSI_COMPLETE status=ok output=$OUTPUT_PATH"
