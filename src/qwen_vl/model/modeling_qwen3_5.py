@@ -87,7 +87,14 @@ def align_qwen3_5_geometry_modules(model):
     if inner_model is None:
         return model
 
-    reference_tensor = getattr(getattr(model, "lm_head", None), "weight", None)
+    # Cached-VGGT fusion executes beside the visual/early-language stream.
+    # On a sharded inference model lm_head may be on a later GPU or CPU;
+    # moving fusion to that device after Accelerate dispatch breaks A/B.
+    controlled = getattr(inner_model, "controlled_vggt_fusion", None)
+    if controlled is not None:
+        reference_tensor = getattr(getattr(inner_model.language_model, "embed_tokens", None), "weight", None)
+    else:
+        reference_tensor = getattr(getattr(model, "lm_head", None), "weight", None)
     if reference_tensor is None or reference_tensor.device.type == "meta":
         for module_name in ("language_model", "visual"):
             module = getattr(inner_model, module_name, None)

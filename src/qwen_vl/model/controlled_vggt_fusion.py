@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Dict, Mapping, Sequence
 
 import torch
@@ -91,6 +92,20 @@ class PreMergerCrossAttention(nn.Module):
         self.output = nn.Linear(visual_dim, visual_dim)
         self.output_norm = nn.LayerNorm(visual_dim)
         self.dropout = nn.Dropout(dropout)
+        # C1 is opt-in and carries no trained state.  Native SFT behavior is
+        # unchanged unless an audited pre-SFT calibration artifact enables it.
+        self._c1_enabled = False
+        self._c1_qk_scale = 1.0
+        self._c1_residual_gain = 1.0
+
+    def set_c1_state(self, *, enabled: bool, qk_scale: float = 1.0, residual_gain: float = 1.0) -> None:
+        if not math.isfinite(qk_scale) or qk_scale <= 0:
+            raise ValueError("C1 Q/K scale must be positive and finite")
+        if not math.isfinite(residual_gain) or residual_gain < 0:
+            raise ValueError("C1 residual gain must be nonnegative and finite")
+        self._c1_enabled = bool(enabled)
+        self._c1_qk_scale = float(qk_scale)
+        self._c1_residual_gain = float(residual_gain)
 
     def forward(
         self,
@@ -111,8 +126,13 @@ class PreMergerCrossAttention(nn.Module):
             geometry = self.geometry_norm(geometry)
             key = self.key(geometry).unsqueeze(0)
             value = self.value(geometry).unsqueeze(0)
+            if self._c1_enabled:
+                query = query * self._c1_qk_scale
+                key = key * self._c1_qk_scale
             update, _ = self.attention(query, key, value, need_weights=False)
             update = self.output_norm(self.output(update.squeeze(0)))
+            if self._c1_enabled:
+                update = update * self._c1_residual_gain
             fused_frames.append(self.dropout(visual + update))
         return torch.cat(fused_frames, dim=0)
 
@@ -138,13 +158,29 @@ class LanguageAddProjector(nn.Module):
         )
         nn.init.zeros_(self.mlp[-1].weight)
         nn.init.zeros_(self.mlp[-1].bias)
+        self._c1_enabled = False
+        self._c1_pre_gelu_scale = 1.0
+        self._c1_residual_gain = 1.0
+
+    def set_c1_state(self, *, enabled: bool, pre_gelu_scale: float = 1.0, residual_gain: float = 1.0) -> None:
+        if not math.isfinite(pre_gelu_scale) or pre_gelu_scale <= 0:
+            raise ValueError("C1 pre-GELU scale must be positive and finite")
+        if not math.isfinite(residual_gain) or residual_gain < 0:
+            raise ValueError("C1 residual gain must be nonnegative and finite")
+        self._c1_enabled = bool(enabled)
+        self._c1_pre_gelu_scale = float(pre_gelu_scale)
+        self._c1_residual_gain = float(residual_gain)
 
     def forward(self, aligned_premerger: torch.Tensor) -> torch.Tensor:
         normalized = self.norm(aligned_premerger)
         group = self.merge_size * self.merge_size
         if normalized.shape[0] % group:
             raise ValueError("Aligned VGGT token count is not divisible by merge area")
-        return self.mlp(normalized.reshape(-1, self.geometry_dim * group))
+        merged = normalized.reshape(-1, self.geometry_dim * group)
+        if not self._c1_enabled:
+            return self.mlp(merged)
+        hidden = self.mlp[0](merged) * self._c1_pre_gelu_scale
+        return self.mlp[2](self.mlp[1](hidden)) * self._c1_residual_gain
 
 
 class CachedVGGTControlledFusion(nn.Module):
@@ -191,6 +227,7 @@ class CachedVGGTControlledFusion(nn.Module):
         """Restore architecture-defined no-op initialization after HF post_init."""
         if self.candidate == self.CANDIDATE_A:
             module = self.premerger_cross_attention
+            module.set_c1_state(enabled=False)
             module.visual_norm.reset_parameters()
             module.geometry_norm.reset_parameters()
             module.query.reset_parameters()
@@ -202,6 +239,7 @@ class CachedVGGTControlledFusion(nn.Module):
             module.output_norm.reset_parameters()
         elif self.candidate == self.CANDIDATE_B:
             for projector in self.language_projectors.values():
+                projector.set_c1_state(enabled=False)
                 nn.init.zeros_(projector.mlp[-1].weight)
                 nn.init.zeros_(projector.mlp[-1].bias)
 
