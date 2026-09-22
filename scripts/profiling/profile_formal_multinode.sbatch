@@ -53,6 +53,8 @@ export CONTROLLED_PROFILE_SKIP_SAVE=1
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,NET
 export MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
+export NNODES="$SLURM_JOB_NUM_NODES"
+export NPROC_PER_NODE=4
 mkdir -p "$TORCH_EXTENSIONS_DIR"
 
 echo "FORMAL_PROFILE_CONFIG job=$SLURM_JOB_ID candidate=$CONTROLLED_FUSION_CANDIDATE nodes=$SLURM_JOB_NUM_NODES gpus_per_node=4 manifest=$CACHED_VGGT_MANIFEST output=$PROFILE_ROOT"
@@ -65,7 +67,8 @@ export PROFILE_PHASE=initial
 export CONTROLLED_PROFILE_COMM_STEP=3
 export CONTROLLED_PROFILE_SAVE_AT_STEP=3
 export CONTROLLED_PROFILE_STOP_AFTER_STEP=3
-time srun --kill-on-bad-exit=1 --ntasks=2 --ntasks-per-node=1 \
+time srun --nodes=2 --ntasks=2 --ntasks-per-node=1 \
+    --gpus-per-task=4 --kill-on-bad-exit=1 --wait=30 --export=ALL \
     bash scripts/profiling/run_formal_multinode_phase.sh
 
 checkpoint="$OUTPUT_DIR/checkpoint-3"
@@ -82,7 +85,8 @@ export PROFILE_PHASE=resume
 export CONTROLLED_PROFILE_COMM_STEP=0
 export CONTROLLED_PROFILE_SAVE_AT_STEP=0
 export CONTROLLED_PROFILE_STOP_AFTER_STEP=5
-time srun --kill-on-bad-exit=1 --ntasks=2 --ntasks-per-node=1 \
+time srun --nodes=2 --ntasks=2 --ntasks-per-node=1 \
+    --gpus-per-task=4 --kill-on-bad-exit=1 --wait=30 --export=ALL \
     bash scripts/profiling/run_formal_multinode_phase.sh
 
 "$PYTHON_BIN" -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); rows=[json.loads(line.split("CONTROLLED_PROFILE_STEP ",1)[1]) for line in p.read_text().splitlines() if "CONTROLLED_PROFILE_STEP " in line]; steps=[row["optimizer_step"] for row in rows]; assert steps==[4,5],steps; print("FORMAL_PROFILE_RESUME verified=true steps=4,5")' "$OUTPUT_DIR/train.rank0.log"

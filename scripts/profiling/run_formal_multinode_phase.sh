@@ -11,6 +11,25 @@ NODE_ROOT="$PROFILE_ROOT/node-$SLURM_PROCID"
 mkdir -p "$NODE_ROOT" "$NODE_ROOT/triton-$PROFILE_PHASE"
 export TRITON_CACHE_DIR="$NODE_ROOT/triton-$PROFILE_PHASE"
 
+"$PYTHON_BIN" - <<'PY'
+import os
+import socket
+import torch
+
+expected = 4
+actual = torch.cuda.device_count()
+if not torch.cuda.is_available() or actual != expected:
+    raise SystemExit(
+        f"{socket.gethostname()}: expected {expected} visible GPUs, got {actual}; "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')}"
+    )
+print(
+    f"FORMAL_PROFILE_GPU_PREFLIGHT host={socket.gethostname()} "
+    f"gpus={actual} cuda_visible={os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')}",
+    flush=True,
+)
+PY
+
 nvidia-smi --query-gpu=timestamp,index,name,memory.total,memory.used,utilization.gpu,utilization.memory,power.draw \
     --format=csv,noheader,nounits -lms 500 > "$NODE_ROOT/nvidia-smi-$PROFILE_PHASE.csv" &
 MONITOR_PID=$!

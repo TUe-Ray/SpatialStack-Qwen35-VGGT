@@ -64,6 +64,8 @@ export CACHE_DIR="${CACHE_DIR:-/scratch-shared/geusdd/SpatialStackQwen35/hf-cach
 export MODEL_PATH="${MODEL_PATH:-/scratch-shared/geusdd/SpatialStackQwen35/models/Qwen3.5-4B}"
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/scratch-shared/geusdd/SpatialStackQwen35/torch_extensions}"
 export MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
+export NNODES="$SLURM_JOB_NUM_NODES"
+export NPROC_PER_NODE=4
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
 export PYTHONNOUSERSITE=1
@@ -76,5 +78,6 @@ unset CONTROLLED_PROFILE_STOP_AFTER_STEP CHECK_ONLY
 
 echo "FORMAL_SFT job=$SLURM_JOB_ID candidate=$CONTROLLED_FUSION_CANDIDATE code=$EXPECTED_GIT_COMMIT manifest_sha=$actual_manifest_sha nodes=$SLURM_JOB_NUM_NODES gpus_per_node=4 output=$OUTPUT_DIR"
 cd "$REPO_ROOT"
-srun --kill-on-bad-exit=1 --ntasks=4 --ntasks-per-node=1 \
+srun --nodes=4 --ntasks=4 --ntasks-per-node=1 \
+    --gpus-per-task=4 --kill-on-bad-exit=1 --wait=30 --export=ALL \
     bash scripts/train/slurm/run_controlled_cached_vggt_formal_node.sh
