@@ -17,6 +17,7 @@ set -euo pipefail
 
 CHECKOUT_ROOT="${CHECKOUT_ROOT:-/gpfs/home4/geusdd/shuang/SpatialStack-heldout}"
 ENV_ROOT="${ENV_ROOT:-/scratch-shared/geusdd/SpatialStackQwen35/env-fast-overlay}"
+EVAL_DEPS_ROOT="${EVAL_DEPS_ROOT:-/scratch-shared/geusdd/SpatialStackQwen35/eval-deps}"
 MODEL_PATH="${MODEL_PATH:-/scratch-shared/geusdd/SpatialStackQwen35/models/Qwen3.5-4B}"
 RUN_ROOT="$BASE_EVAL_ROOT/job-$SLURM_JOB_ID"
 
@@ -29,6 +30,7 @@ if ! git -C "$CHECKOUT_ROOT" cat-file -e "$EXPECTED_GIT_COMMIT^{commit}"; then
     exit 2
 fi
 test -s "$MODEL_PATH/config.json"
+test -d "$EVAL_DEPS_ROOT/sacrebleu"
 test -s /scratch-shared/geusdd/VLM3R/data/vsibench/test_pruned.parquet
 test -s /scratch-shared/geusdd/VLM3R/data/vsibench/test_debiased.parquet
 test -d /scratch-shared/geusdd/VLM3R/hf_cache/vsibench
@@ -41,7 +43,7 @@ module load CUDA/12.9.1
 
 export PROJECT_ROOT="$RUN_ROOT/source"
 export PYTHONNOUSERSITE=1
-export PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}"
+export PYTHONPATH="$EVAL_DEPS_ROOT:$PROJECT_ROOT/src:${PYTHONPATH:-}"
 export PATH="$ENV_ROOT/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 export HF_HOME=/scratch-shared/geusdd/VLM3R/hf_cache
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
