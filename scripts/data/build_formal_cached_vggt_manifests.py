@@ -40,7 +40,7 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def metadata(path: Path, required_layers: set[str]) -> tuple[list[int], str]:
+def metadata(path: Path, required_layers: set[str], exact_layers: bool = False) -> tuple[list[int], str]:
     payload = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     frames = payload["frames"]
     frame_idx = frames["frame_idx"]
@@ -55,6 +55,11 @@ def metadata(path: Path, required_layers: set[str]) -> tuple[list[int], str]:
         raise ValueError(f"{path}: incompatible VGGT metadata")
     if not required_layers.issubset(layers):
         raise ValueError(f"{path}: required VGGT layers are absent")
+    if exact_layers and (
+        {str(layer) for layer in layers} != required_layers
+        or {str(layer) for layer in meta.get("intermediate_layer_idx", [])} != required_layers
+    ):
+        raise ValueError(f"{path}: expected exactly VGGT layers {sorted(required_layers)}")
     for layer in required_layers:
         tensor = layers[layer]
         if tuple(tensor.shape) != (32, 1374, 2048) or tensor.dtype != torch.bfloat16:

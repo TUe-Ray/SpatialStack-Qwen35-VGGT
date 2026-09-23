@@ -218,6 +218,11 @@ class Qwen3_5(lmms):
         geometry_encoder_path = geometry_encoder_path or getattr(config, "geometry_encoder_path", None)
         self.cached_vggt_store = None
         if use_cached_vggt:
+            if adapter_path is None:
+                raise ValueError("Controlled cached-VGGT evaluation requires a trained PEFT checkpoint")
+            fusion_artifact = Path(adapter_path) / "controlled_vggt_fusion.bin"
+            if not fusion_artifact.is_file():
+                raise FileNotFoundError(f"Controlled fusion checkpoint is missing: {fusion_artifact}")
             if not cached_vggt_manifest or not cached_vggt_data_root:
                 raise ValueError(
                     "cached_vggt_manifest and cached_vggt_data_root are required for cached-VGGT evaluation"
@@ -265,11 +270,39 @@ class Qwen3_5(lmms):
             from peft import PeftModel
             from qwen_vl.model.modeling_qwen3_5 import load_qwen3_5_controlled_submodules
 
-            load_qwen3_5_controlled_submodules(self._model, adapter_path)
+            if use_cached_vggt:
+                fusion_state = torch.load(
+                    Path(adapter_path) / "controlled_vggt_fusion.bin",
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                expected_fusion_state = self._model.controlled_vggt_fusion.state_dict()
+                expected_shapes = {
+                    f"model.controlled_vggt_fusion.{key}": tuple(value.shape)
+                    for key, value in expected_fusion_state.items()
+                }
+                observed_shapes = {key: tuple(value.shape) for key, value in fusion_state.items()}
+                if observed_shapes != expected_shapes:
+                    raise ValueError(
+                        f"Controlled fusion artifact keys/shapes do not match {candidate}: "
+                        f"{Path(adapter_path) / 'controlled_vggt_fusion.bin'}"
+                    )
+            loaded = load_qwen3_5_controlled_submodules(self._model, adapter_path)
+            if use_cached_vggt:
+                expected_keys = len(expected_fusion_state)
+                if loaded != expected_keys:
+                    raise RuntimeError(
+                        f"Controlled fusion checkpoint loaded {loaded}/{expected_keys} tensors: {adapter_path}"
+                    )
             self._model = PeftModel.from_pretrained(self._model, adapter_path).eval()
 
+        processor_source = pretrained
+        if adapter_path is not None and not (Path(pretrained) / "processor_config.json").is_file():
+            # Intermediate Trainer checkpoint-* directories save the tokenizer but
+            # only the final output root saves the complete processor.
+            processor_source = model_source
         self.processor = AutoProcessor.from_pretrained(
-            pretrained,
+            processor_source,
             max_pixels=max_pixels,
             min_pixels=min_pixels,
             padding_side="left",

@@ -219,3 +219,63 @@ The official defaults do not enable TF32 or `torch.compile`, whereas the old
 SpatialFocus runs enabled both. This branch keeps the official Qwen3.5 choices
 for now; changing them is a separate common-configuration decision and must be
 applied identically to A and B after a measured smoke comparison.
+
+## Prepared controlled VSI-Bench evaluation (not submitted by this change)
+
+The local VSI-Bench parquet pair contains 5,130 QA rows on 288 distinct
+videos. The audited VGGT inventory has exactly the same 288 evaluation videos.
+`scripts/data/build_vsibench_cached_vggt_manifests.sbatch` builds paired
+manifests with dataset key `vsibench` and exact relative video paths. Candidate
+A uses the audited L23-only sidecar SHA256; Candidate B hashes the original
+three-layer sidecar. The builder validates 32 identical frame IDs and source
+provenance across both sidecars. Keep the two generated manifest files and
+their reported SHA256 values together as one comparison input.
+
+After reviewing and committing the evaluation code, build the paired
+manifests once (this command is documentation, not an automatic submission):
+
+```bash
+commit=$(git rev-parse HEAD)
+sbatch --output=/scratch-shared/geusdd/SpatialStackQwen35/vsi-manifests-%j.out \
+  --export=ALL,EXPECTED_GIT_COMMIT="$commit",MANIFEST_BUILD_ROOT=/scratch-shared/geusdd/SpatialStackQwen35/vsi-manifest-build \
+  scripts/data/build_vsibench_cached_vggt_manifests.sbatch
+```
+
+For each trained checkpoint, use
+`scripts/evaluation/run_qwen35_controlled_vsibench_snellius.sbatch` with:
+
+- `CONTROLLED_FUSION_CANDIDATE=a_premerger_cross_attn` or `b_llm_add`;
+- `CHECKPOINT_PATH` pointing to an explicit completed `checkpoint-N` or final
+  output directory, never an automatically chosen latest checkpoint;
+- `CACHED_VGGT_MANIFEST` and `EXPECTED_MANIFEST_SHA256` from the matching
+  manifest builder output;
+- `EXPECTED_GIT_COMMIT` and `CONTROLLED_EVAL_ROOT` on shared scratch.
+
+Submit A and B separately with the same committed evaluator, using the exact
+manifest paths and SHA256 values emitted by the builder:
+
+```bash
+sbatch --output=/scratch-shared/geusdd/SpatialStackQwen35/controlled-vsi-%j.out \
+  --export=ALL,CONTROLLED_FUSION_CANDIDATE=a_premerger_cross_attn,CHECKPOINT_PATH=/path/to/A/output/checkpoint-100,CACHED_VGGT_MANIFEST=/path/to/candidate-a-l23-vsibench.json,EXPECTED_MANIFEST_SHA256=<sha256>,EXPECTED_GIT_COMMIT=<commit>,CONTROLLED_EVAL_ROOT=/scratch-shared/geusdd/SpatialStackQwen35/controlled-vsibench \
+  scripts/evaluation/run_qwen35_controlled_vsibench_snellius.sbatch
+```
+
+Replace the candidate, checkpoint, manifest, and manifest SHA256 for B. The
+evaluation job refuses missing inputs or an existing run directory.
+
+The wrapper uses the same 4-A100, 32-frame, 12,800-token, 12,544--451,584
+pixel, BF16/FlashAttention-2/Fast Linear Attention and local parquet
+VSI-Bench settings as the base-Qwen evaluation. It checks candidate/base-model
+identity and all 288 RGB/sidecar pairs before loading the model, runs a
+four-sample evaluation smoke, then the complete 5,130-sample evaluation. The
+candidate's cached-VGGT loader checks each sidecar SHA256 and exact original
+frame IDs; no online VGGT is constructed. Intermediate `checkpoint-N`
+directories can lack `processor_config.json`, so the evaluation adapter uses
+the unchanged native processor from the recorded base checkpoint in that case.
+It rejects missing or shape-incompatible trained fusion weights rather than
+silently evaluating randomly initialized fusion modules.
+
+These scripts only prepare evaluation. Do not submit A/B evaluations until
+their training checkpoint and paired VSI manifests exist and their provenance
+has been reviewed. This VSI-Bench score is a post-SFT diagnostic; the separate
+pre-SFT architecture ranking metric remains validation `delta125`.
