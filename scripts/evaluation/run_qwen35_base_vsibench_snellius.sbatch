@@ -57,9 +57,6 @@ export MODEL_PATH
 export MODEL_IMPL=qwen3_5
 export BENCHMARKS=vsibench_snellius
 export MODEL_ARGS_BASE="pretrained=$MODEL_PATH,use_flash_attention_2=true,min_pixels=12544,max_pixels=451584,max_num_frames=32,max_length=12800,disable_thinking=true"
-export LMMS_EVAL_LAUNCHER=accelerate
-export NUM_MACHINES=1
-export PROCESSES_PER_MACHINE=4
 export MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
 export NCCL_NVLS_ENABLE=0
 
@@ -84,12 +81,25 @@ PY
 echo "BASE_VSI_CONFIG job=$SLURM_JOB_ID code=$EXPECTED_GIT_COMMIT model=$MODEL_PATH samples=5130 frames=32 gpus=4 output=$RUN_ROOT"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-export LIMIT=4
-export OUTPUT_PATH="$RUN_ROOT/smoke"
-bash scripts/evaluation/eval.sh
+run_eval() {
+    local result_root="$1"
+    shift
+    "$ENV_ROOT/bin/python" -m torch.distributed.run \
+        --nnodes=1 --nproc_per_node=4 \
+        --master_addr=127.0.0.1 --master_port="$MASTER_PORT" \
+        -m lmms_eval \
+        --model "$MODEL_IMPL" \
+        --model_args "$MODEL_ARGS_BASE" \
+        --tasks "$BENCHMARKS" \
+        --batch_size 1 \
+        --output_path "$result_root" \
+        --verbosity INFO \
+        --log_samples \
+        "$@"
+}
+
+run_eval "$RUN_ROOT/smoke" --limit 4
 echo "BASE_VSI_SMOKE status=ok"
 
-unset LIMIT
-export OUTPUT_PATH="$RUN_ROOT/full"
-bash scripts/evaluation/eval.sh
-echo "BASE_VSI_COMPLETE status=ok output=$OUTPUT_PATH"
+run_eval "$RUN_ROOT/full"
+echo "BASE_VSI_COMPLETE status=ok output=$RUN_ROOT/full"
