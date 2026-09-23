@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=36
 #SBATCH --gres=gpu:4
 #SBATCH --mem=240G
-#SBATCH --time=08:00:00
+#SBATCH --time=20:00:00
 
 set -euo pipefail
 
@@ -31,6 +31,8 @@ if ! git -C "$CHECKOUT_ROOT" cat-file -e "$EXPECTED_GIT_COMMIT^{commit}"; then
 fi
 test -s "$MODEL_PATH/config.json"
 test -d "$EVAL_DEPS_ROOT/sacrebleu"
+test -d "$EVAL_DEPS_ROOT/pytablewriter"
+test -d "$EVAL_DEPS_ROOT/chardet"
 test -s /scratch-shared/geusdd/VLM3R/data/vsibench/test_pruned.parquet
 test -s /scratch-shared/geusdd/VLM3R/data/vsibench/test_debiased.parquet
 test -d /scratch-shared/geusdd/VLM3R/hf_cache/vsibench
