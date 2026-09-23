@@ -13,12 +13,23 @@ set -euo pipefail
 
 : "${CONTROLLED_FUSION_CANDIDATE:?Choose a_premerger_cross_attn or b_llm_add}"
 : "${PROFILE_BASE:?Set a scratch profiling output root}"
+: "${EXPECTED_GIT_COMMIT:?Pin the approved smoke source commit}"
 
-REPO_ROOT="${REPO_ROOT:-/gpfs/home4/geusdd/shuang/SpatialStack-heldout}"
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-/gpfs/home4/geusdd/shuang/SpatialStack-heldout}"
 ENV_ROOT="${ENV_ROOT:-/scratch-shared/geusdd/SpatialStackQwen35/env-fast-overlay}"
 MANIFEST_ROOT="${MANIFEST_ROOT:-/scratch-shared/geusdd/SpatialStackQwen35/formal-manifests}"
 PROFILE_ROOT="$PROFILE_BASE/${CONTROLLED_FUSION_CANDIDATE}-${SLURM_JOB_ID}"
-mkdir -p "$PROFILE_ROOT" "$PROFILE_ROOT/output" "$PROFILE_ROOT/phase-logs"
+if [[ -e "$PROFILE_ROOT" ]]; then
+    echo "Refusing to overwrite existing smoke output: $PROFILE_ROOT" >&2
+    exit 2
+fi
+if ! git -C "$CHECKOUT_ROOT" cat-file -e "$EXPECTED_GIT_COMMIT^{commit}"; then
+    echo "Pinned smoke code commit is unavailable: $EXPECTED_GIT_COMMIT" >&2
+    exit 2
+fi
+mkdir -p "$PROFILE_ROOT/source" "$PROFILE_ROOT/output" "$PROFILE_ROOT/phase-logs"
+git -C "$CHECKOUT_ROOT" archive "$EXPECTED_GIT_COMMIT" | tar -xf - -C "$PROFILE_ROOT/source"
+REPO_ROOT="$PROFILE_ROOT/source"
 cd "$REPO_ROOT"
 
 module load 2025
@@ -58,7 +69,7 @@ export NPROC_PER_NODE=4
 mkdir -p "$TORCH_EXTENSIONS_DIR"
 
 echo "FORMAL_PROFILE_CONFIG job=$SLURM_JOB_ID candidate=$CONTROLLED_FUSION_CANDIDATE nodes=$SLURM_JOB_NUM_NODES gpus_per_node=4 manifest=$CACHED_VGGT_MANIFEST output=$PROFILE_ROOT"
-echo "FORMAL_PROFILE_GIT commit=$(git rev-parse HEAD)"
+echo "FORMAL_PROFILE_GIT commit=$EXPECTED_GIT_COMMIT"
 
 # All production hyperparameters, full QA data, and the formal 100-step save
 # interval remain fixed in train_controlled_cached_vggt_formal.sh. The only
