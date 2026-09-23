@@ -414,7 +414,14 @@ class Qwen3_5(lmms):
             indices = np.arange(frame_count)
         else:
             indices = np.linspace(0, frame_count - 1, self.max_num_frames).astype(int)
-        return [Image.fromarray(vr[i].asnumpy()).convert("RGB") for i in indices], None
+        # Decode the exact same frame IDs as before in one batch. Sequential
+        # vr[i] calls can hit Decord's EOF retry limit on long VSI-Bench clips.
+        decoded = vr.get_batch(indices.tolist()).asnumpy()
+        if len(decoded) != len(indices):
+            raise RuntimeError(
+                f"Decoded {len(decoded)}/{len(indices)} requested frames from {video_path}"
+            )
+        return [Image.fromarray(frame).convert("RGB") for frame in decoded], None
 
     def _build_sample(self, context, visual):
         sample_images = []
