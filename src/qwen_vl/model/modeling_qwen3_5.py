@@ -30,6 +30,7 @@ from .feature_fusion import (
 from .geometry_encoders import GeometryEncoderConfig, create_geometry_encoder
 from .position_utils import get_2d_sincos_pos_embed
 from .controlled_vggt_fusion import CachedVGGTControlledFusion
+from .supervised_token_loss import supervised_token_causal_loss
 
 
 GEOMETRY_STATE_KEYWORDS = (
@@ -938,12 +939,22 @@ class Qwen3_5ForConditionalGenerationWithGeometry(Qwen3_5ForConditionalGeneratio
         )
 
         hidden_states = outputs[0]
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)
+        use_sparse_loss = (
+            labels is not None
+            and self.training
+            and getattr(self.config, "use_cached_vggt", False)
+            and os.environ.get("CONTROLLED_SUPERVISED_LOGITS_ONLY") == "1"
+            and isinstance(logits_to_keep, int)
+            and logits_to_keep == 0
+        )
+        if use_sparse_loss:
+            loss, logits = supervised_token_causal_loss(hidden_states, labels, self.lm_head)
+        else:
+            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
+            loss = None
+            if labels is not None:
+                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)
 
         return Qwen3_5CausalLMOutputWithPast(
             loss=loss,

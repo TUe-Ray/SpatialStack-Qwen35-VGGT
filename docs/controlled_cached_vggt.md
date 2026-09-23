@@ -118,9 +118,11 @@ the three un-subsampled SpatialFocus annotations:
 
 The wrapper also fixes one epoch, 32 cached frames, effective global batch
 128, and checkpoint interval 100 optimizer steps. It retains 20 checkpoints,
-enough for all 16 periodic saves in the 1,622-step epoch. This is the observed
-SpatialFocus behavior with `dataloader_drop_last=True`; the informal
-`ceil(207658 / 128) = 1623` calculation does not describe that sampler. On 4
+enough for all 16 periodic saves. The current Qwen3.5 Transformers 5.3.0
+Trainer reported 1,623 update steps in the 8-GPU formal smoke even with
+`dataloader_drop_last=True`: the final partial gradient-accumulation window
+counts as an update. Earlier SpatialFocus runs reported 1,622 under their
+training runtime, so the observed step count must be recorded per run. On 4
 nodes with 4 GPUs per node and microbatch one, gradient accumulation is 8.
 The wrapper fixes both `seed` and `data_seed` to 42, matching those formal
 SpatialFocus runs.

@@ -45,14 +45,15 @@ export NUM_TRAIN_EPOCHS=1
 export MAX_STEPS=-1
 export SAVE_STRATEGY=steps
 export SAVE_STEPS=100
-# drop_last matches the prior SpatialFocus runs: 1,622 optimizer steps and
-# therefore 16 periodic checkpoints at interval 100.
+# drop_last matches the prior SpatialFocus runs. Trainer still counts the final
+# partial gradient-accumulation window, yielding 1,623 optimizer steps.
 export SAVE_TOTAL_LIMIT=20
 export CACHED_VGGT_NUM_FRAMES=32
 export VIDEO_MAX_FRAMES=32
 export VIDEO_MIN_FRAMES=32
 export USE_GEOMETRY_ENCODER=false
 export USE_CACHED_VGGT=true
+export CONTROLLED_SUPERVISED_LOGITS_ONLY=1
 export TUNE_MM_LLM=false
 export LORA_ENABLE=true
 export DATA_FLATTEN=False
@@ -90,7 +91,7 @@ if (( TOTAL_BATCH_SIZE % WORLD_SIZE_PREVIEW != 0 )); then
     echo "TOTAL_BATCH_SIZE=$TOTAL_BATCH_SIZE is not divisible by WORLD_SIZE=$WORLD_SIZE_PREVIEW" >&2
     exit 2
 fi
-echo "CONTROLLED_SFT_CONFIG samples=$EXPECTED_TRAIN_SAMPLES datasets=$DATASETS global_batch=$TOTAL_BATCH_SIZE world_size=$WORLD_SIZE_PREVIEW grad_accum=$((TOTAL_BATCH_SIZE / WORLD_SIZE_PREVIEW)) optimizer_steps_per_epoch=1622 save_steps=$SAVE_STEPS seed=$SEED data_seed=$DATA_SEED drop_last=$DATALOADER_DROP_LAST attention=$ATTN_IMPLEMENTATION"
+echo "CONTROLLED_SFT_CONFIG samples=$EXPECTED_TRAIN_SAMPLES datasets=$DATASETS global_batch=$TOTAL_BATCH_SIZE world_size=$WORLD_SIZE_PREVIEW grad_accum=$((TOTAL_BATCH_SIZE / WORLD_SIZE_PREVIEW)) optimizer_steps_per_epoch=1623 save_steps=$SAVE_STEPS seed=$SEED data_seed=$DATA_SEED drop_last=$DATALOADER_DROP_LAST attention=$ATTN_IMPLEMENTATION supervised_logits_only=$CONTROLLED_SUPERVISED_LOGITS_ONLY"
 
 if [[ "${CHECK_ONLY:-0}" == "1" ]]; then
     echo "CHECK_ONLY=1: validation complete; training was not launched"
