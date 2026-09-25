@@ -54,6 +54,8 @@ class DataArguments:
     cached_vggt_verify_sha256: bool = field(default=True)
     cached_vggt_layers: Optional[List[int]] = field(default=None)
     cached_vggt_require_exact_layers: bool = field(default=False)
+    cached_rgb_root: Optional[str] = field(default=None)
+    cached_vggt_decord_threads: int = field(default=4)
     expected_train_samples: Optional[int] = field(
         default=None,
         metadata={

@@ -51,6 +51,24 @@ exactly layer 23. Build its manifest with `--layers 23 --exact-layers` and the
 L23-only cache root. Candidate B continues to accept the established
 multi-layer sidecars and selects layers 11/17/23.
 
+The optional `CACHED_RGB_ROOT` enables an on-demand, lossless cache of the
+decoded RGB pixels at the exact sidecar frame IDs. The cache key includes the
+resolved video path and selected frame IDs; each entry records source file
+identity, frame IDs, and a SHA256 of the RGB pixels. Changed source identity,
+wrong frame IDs, or corrupt pixels raise an error. A missing entry is built
+with the same exact-frame decoder and installed atomically under a per-video
+lock. Training and controlled VSI-Bench evaluation share this loader and may
+use separate scratch cache roots. First use takes extra CPU time and storage.
+
+`CACHED_VGGT_DECORD_THREADS` selects decoder threads per dataloader worker
+(default 4); `DATALOADER_PREFETCH_FACTOR` controls queued batches per worker
+(default 2). Both are runtime performance controls. Change them only after
+measuring CPU, RAM, and GPU wait on the target allocation. The profiling-only
+comparison script is `scripts/profiling/benchmark_exact_rgb_cache.py`. To
+prewarm a selected annotation on CPU before a GPU run, use
+`scripts/data/build_exact_rgb_cache.py` with the same manifest, dataset tag,
+media root, and cache root. It validates sidecar provenance while building.
+
 ## Candidates
 
 - `a_premerger_cross_attn`: layer 23 only; resize 37x37 patches to each Qwen

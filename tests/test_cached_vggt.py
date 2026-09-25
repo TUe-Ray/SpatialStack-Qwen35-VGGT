@@ -125,6 +125,19 @@ class CachedVGGTStoreTest(unittest.TestCase):
             sample = store.load("fixture", "scene", str(root / "media"))
             self.assertEqual(set(sample.features), {"23"})
 
+    def test_modified_sidecar_rechecks_finite_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _ = self._fixture(root, layers=(23,))
+            store = CachedVGGTStore(str(manifest), [23], num_frames=2, verify_sha256=False)
+            store.load("fixture", "scene", str(root / "media"))
+            sidecar = root / "scene.pt"
+            payload = torch.load(sidecar, map_location="cpu", weights_only=False)
+            payload["frames"]["aggregated_tokens"]["23"][0, 5, 0] = float("nan")
+            torch.save(payload, sidecar)
+            with self.assertRaisesRegex(CachedVGGTError, "not finite"):
+                store.load("fixture", "scene", str(root / "media"))
+
 
 if __name__ == "__main__":
     unittest.main()

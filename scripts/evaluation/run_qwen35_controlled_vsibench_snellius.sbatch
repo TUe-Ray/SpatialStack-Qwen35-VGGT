@@ -94,6 +94,11 @@ PY
     --require-fast-linear-attention --require-cuda
 
 MODEL_ARGS_BASE="pretrained=$CHECKPOINT_PATH,use_flash_attention_2=true,min_pixels=12544,max_pixels=451584,max_num_frames=32,max_length=12800,disable_thinking=true,cached_vggt_manifest=$CACHED_VGGT_MANIFEST,cached_vggt_dataset=vsibench,cached_vggt_data_root=$MEDIA_ROOT"
+if [[ -n "${CACHED_RGB_ROOT:-}" ]]; then
+    [[ "$CACHED_RGB_ROOT" = /* ]] || { echo "CACHED_RGB_ROOT must be absolute" >&2; exit 2; }
+    MODEL_ARGS_BASE+=",cached_rgb_root=$CACHED_RGB_ROOT"
+fi
+MODEL_ARGS_BASE+=",cached_vggt_decord_threads=${CACHED_VGGT_DECORD_THREADS:-4}"
 echo "CONTROLLED_VSI_CONFIG job=$SLURM_JOB_ID candidate=$CONTROLLED_FUSION_CANDIDATE code=$EXPECTED_GIT_COMMIT checkpoint=$CHECKPOINT_PATH manifest_sha=$actual_manifest_sha samples=5130 videos=288 frames=32 gpus=4 output=$RUN_ROOT"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 

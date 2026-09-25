@@ -87,6 +87,7 @@ MODEL_MAX_LENGTH="${MODEL_MAX_LENGTH:-12800}"
 MAX_PIXELS="${MAX_PIXELS:-$((576*28*28))}"
 MIN_PIXELS="${MIN_PIXELS:-$((16*28*28))}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
+DATALOADER_PREFETCH_FACTOR="${DATALOADER_PREFETCH_FACTOR:-2}"
 DATALOADER_DROP_LAST="${DATALOADER_DROP_LAST:-false}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG-scripts/zero2_opt.json}"
 REMOVE_UNUSED_COLUMNS="${REMOVE_UNUSED_COLUMNS:-false}"
@@ -176,6 +177,7 @@ train_args=(
          --save_total_limit "$SAVE_TOTAL_LIMIT"
          --gradient_checkpointing
          --dataloader_num_workers "$DATALOADER_NUM_WORKERS"
+         --dataloader_prefetch_factor "$DATALOADER_PREFETCH_FACTOR"
          --dataloader_drop_last "$DATALOADER_DROP_LAST"
          --remove_unused_columns "$REMOVE_UNUSED_COLUMNS"
          --group_by_modality_length true
@@ -213,7 +215,11 @@ if [[ "${USE_CACHED_VGGT,,}" == "true" ]]; then
          --controlled_fusion_candidate "$CONTROLLED_FUSION_CANDIDATE"
          --cached_vggt_manifest "$CACHED_VGGT_MANIFEST"
          --cached_vggt_num_frames "$CACHED_VGGT_NUM_FRAMES"
+         --cached_vggt_decord_threads "${CACHED_VGGT_DECORD_THREADS:-4}"
     )
+    if [[ -n "${CACHED_RGB_ROOT:-}" ]]; then
+        train_args+=(--cached_rgb_root "$CACHED_RGB_ROOT")
+    fi
 fi
 
 if [[ "${USE_GEOMETRY_ENCODER,,}" == "true" ]]; then

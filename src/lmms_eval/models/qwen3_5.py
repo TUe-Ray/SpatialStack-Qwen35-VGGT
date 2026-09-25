@@ -147,6 +147,8 @@ class Qwen3_5(lmms):
         cached_vggt_dataset: str = "vsibench",
         cached_vggt_data_root: Optional[str] = None,
         cached_vggt_verify_sha256: bool = True,
+        cached_rgb_root: Optional[str] = None,
+        cached_vggt_decord_threads: int = 4,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -245,6 +247,8 @@ class Qwen3_5(lmms):
                 num_frames=max_num_frames,
                 verify_sha256=cached_vggt_verify_sha256,
                 require_exact_layers=(candidate == "a_premerger_cross_attn"),
+                rgb_cache_root=cached_rgb_root,
+                decord_threads=cached_vggt_decord_threads,
             )
         if use_geometry_model:
             from qwen_vl.model.modeling_qwen3_5 import Qwen3_5ForConditionalGenerationWithGeometry

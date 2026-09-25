@@ -20,6 +20,8 @@ import torch
 from decord import VideoReader
 from PIL import Image
 
+from .rgb_frame_cache import ExactRGBFrameCache
+
 
 MANIFEST_SCHEMA = "spatialfocus.cached_vggt.v1"
 VGGT_SPECIAL_TOKENS = 5
@@ -52,6 +54,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 @dataclass(frozen=True)
 class CachedVGGTSample:
     images: list[Image.Image]
@@ -72,6 +79,8 @@ class CachedVGGTStore:
         num_frames: int,
         verify_sha256: bool = True,
         require_exact_layers: bool = False,
+        rgb_cache_root: str | None = None,
+        decord_threads: int = 4,
     ) -> None:
         self.manifest_path = Path(manifest_path).expanduser().resolve()
         if required_layers is None:
@@ -80,9 +89,14 @@ class CachedVGGTStore:
         self.num_frames = int(num_frames)
         self.verify_sha256 = bool(verify_sha256)
         self.require_exact_layers = bool(require_exact_layers)
-        self._verified_sidecars: set[Path] = set()
+        self.rgb_cache = ExactRGBFrameCache(rgb_cache_root) if rgb_cache_root else None
+        self.decord_threads = int(decord_threads)
+        self._verified_sidecars: dict[Path, tuple[int, int, int, int, int]] = {}
+        self._finite_layers: dict[tuple[Path, str], tuple[int, int, int, int, int]] = {}
         if self.num_frames <= 0:
             raise ValueError("num_frames must be positive")
+        if self.decord_threads <= 0:
+            raise ValueError("decord_threads must be positive")
         self.records = self._read_manifest()
 
     def _read_manifest(self) -> Dict[str, Mapping]:
@@ -113,14 +127,17 @@ class CachedVGGTStore:
         sidecar = sidecar.resolve()
         if not sidecar.is_file():
             raise FileNotFoundError(f"VGGT sidecar not found: {sidecar}")
+        identity = _file_identity(sidecar)
         expected_hash = record.get("sha256")
         if self.verify_sha256:
             if not expected_hash:
                 raise CachedVGGTError(f"Manifest record has no SHA256 for sidecar: {sidecar}")
-            if sidecar not in self._verified_sidecars:
+            if self._verified_sidecars.get(sidecar) != identity:
                 if _sha256(sidecar) != expected_hash:
                     raise CachedVGGTError(f"SHA256 mismatch for VGGT sidecar: {sidecar}")
-                self._verified_sidecars.add(sidecar)
+                if _file_identity(sidecar) != identity:
+                    raise CachedVGGTError(f"VGGT sidecar changed during SHA256 verification: {sidecar}")
+                self._verified_sidecars[sidecar] = identity
         return sidecar
 
     def _select_positions(self, frame_count: int, record: Mapping) -> torch.LongTensor:
@@ -146,7 +163,9 @@ class CachedVGGTStore:
         return torch.as_tensor(positions, dtype=torch.long)
 
     @staticmethod
-    def _read_exact_frames(video_path: Path, frame_ids: torch.LongTensor) -> list[Image.Image]:
+    def _read_exact_frames(
+        video_path: Path, frame_ids: torch.LongTensor, decord_threads: int = 4
+    ) -> list[Image.Image]:
         if video_path.is_dir():
             frame_files = sorted(path for path in video_path.iterdir() if path.is_file())
             if not frame_files:
@@ -159,7 +178,7 @@ class CachedVGGTStore:
 
         if not video_path.is_file():
             raise FileNotFoundError(f"RGB video not found: {video_path}")
-        reader = VideoReader(str(video_path), num_threads=4)
+        reader = VideoReader(str(video_path), num_threads=decord_threads)
         if int(frame_ids[-1]) >= len(reader):
             raise CachedVGGTError(
                 f"Frame ID {int(frame_ids[-1])} exceeds video length {len(reader)}"
@@ -178,7 +197,12 @@ class CachedVGGTStore:
         record = self.records[key]
         sidecar_path = self._resolve_sidecar(record)
         resolved_at = time.perf_counter()
+        sidecar_identity = _file_identity(sidecar_path)
+        if self.verify_sha256 and self._verified_sidecars.get(sidecar_path) != sidecar_identity:
+            raise CachedVGGTError(f"VGGT sidecar changed after SHA256 verification: {sidecar_path}")
         sidecar = torch.load(sidecar_path, map_location="cpu", weights_only=False)
+        if _file_identity(sidecar_path) != sidecar_identity:
+            raise CachedVGGTError(f"VGGT sidecar changed during loading: {sidecar_path}")
         deserialized_at = time.perf_counter()
         try:
             raw_frame_idx = sidecar["frames"]["frame_idx"]
@@ -264,14 +288,30 @@ class CachedVGGTStore:
                 raise CachedVGGTError(
                     f"VGGT layer {layer} has dtype {tensor.dtype}; expected torch.bfloat16"
                 )
-            if not torch.isfinite(tensor.float()).all():
-                raise CachedVGGTError(f"VGGT layer {layer} is not finite floating point data")
+            finite_key = (sidecar_path, layer)
+            if self._finite_layers.get(finite_key) != sidecar_identity:
+                if not bool(torch.isfinite(tensor).all()):
+                    raise CachedVGGTError(f"VGGT layer {layer} is not finite floating point data")
+                self._finite_layers[finite_key] = sidecar_identity
             # Special/register/camera tokens are removed at this provenance boundary.
-            features[layer] = tensor.index_select(0, positions)[:, VGGT_SPECIAL_TOKENS:].contiguous()
+            patch_tokens = tensor[:, VGGT_SPECIAL_TOKENS:]
+            if torch.equal(positions, torch.arange(len(frame_idx), dtype=torch.long)):
+                features[layer] = patch_tokens.contiguous()
+            else:
+                features[layer] = patch_tokens.index_select(0, positions)
 
         validated_at = time.perf_counter()
         video_path = Path(data_root).expanduser() / _normalized_relative_path(video)
-        images = self._read_exact_frames(video_path.resolve(), chosen_ids)
+        video_path = video_path.resolve()
+        cache_hit = False
+        if self.rgb_cache is not None and video_path.is_file():
+            images, cache_hit = self.rgb_cache.load_or_create(
+                video_path,
+                chosen_ids.tolist(),
+                lambda: self._read_exact_frames(video_path, chosen_ids, self.decord_threads),
+            )
+        else:
+            images = self._read_exact_frames(video_path, chosen_ids, self.decord_threads)
         decoded_at = time.perf_counter()
         if len(images) != len(chosen_ids):
             raise CachedVGGTError("RGB/VGGT frame count mismatch after exact selection")
@@ -286,7 +326,9 @@ class CachedVGGTStore:
                     "manifest_resolve_sha_sec": resolved_at - load_started,
                     "sidecar_deserialize_sec": deserialized_at - resolved_at,
                     "sidecar_validate_select_sec": validated_at - deserialized_at,
-                    "rgb_decode_sec": decoded_at - validated_at,
+                    "rgb_decode_sec": 0.0 if cache_hit else decoded_at - validated_at,
+                    "rgb_cache_load_sec": decoded_at - validated_at if cache_hit else 0.0,
+                    "rgb_cache_hit": float(cache_hit),
                     "cached_vggt_total_sec": decoded_at - load_started,
                 }
                 if profile_enabled
