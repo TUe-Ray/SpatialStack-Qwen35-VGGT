@@ -1,7 +1,9 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 from qwen_vl.data.rgb_frame_cache import ExactRGBFrameCache, RGBFrameCacheError
@@ -34,6 +36,28 @@ class ExactRGBFrameCacheTest(unittest.TestCase):
                 Image.new("RGB", (3, 2), (8, 4, 5)),
             ])
             self.assertFalse(hit)
+
+    def test_cross_node_device_number_does_not_invalidate_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "scene.mp4"
+            video.write_bytes(b"fixture video")
+            cache = ExactRGBFrameCache(str(root / "rgb"))
+            cache.load_or_create(video, [1], lambda: [Image.new("RGB", (2, 2), (1, 2, 3))])
+            path = cache._path(video, [1])
+            with np.load(path, allow_pickle=False) as stored:
+                rgb = stored["rgb"]
+                metadata = json.loads(stored["metadata"].tobytes().decode("utf-8"))
+            metadata["source"]["device"] = 999999
+            with path.open("wb") as output:
+                np.savez_compressed(
+                    output,
+                    rgb=rgb,
+                    metadata=np.frombuffer(json.dumps(metadata).encode("utf-8"), dtype=np.uint8),
+                )
+            images, hit = cache.load_or_create(video, [1], lambda: [])
+            self.assertTrue(hit)
+            self.assertEqual(images[0].getpixel((0, 0)), (1, 2, 3))
 
     def test_corrupt_or_stale_cache_fails_loudly(self):
         with tempfile.TemporaryDirectory() as directory:

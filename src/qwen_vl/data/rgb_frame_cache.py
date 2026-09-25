@@ -27,7 +27,7 @@ def _file_identity(path: Path) -> dict[str, int | str]:
     stat = path.stat()
     return {
         "path": str(path.resolve()),
-        "device": stat.st_dev,
+        # GPFS can report a different st_dev for the same file on another node.
         "inode": stat.st_ino,
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
@@ -59,7 +59,14 @@ class ExactRGBFrameCache:
                 if stored.get("schema") != SCHEMA:
                     raise RGBFrameCacheError(f"RGB cache schema mismatch: {path}")
                 for key, value in expected.items():
-                    if stored.get(key) != value:
+                    actual = stored.get(key)
+                    if key == "source" and isinstance(actual, dict):
+                        # Accept entries made before st_dev was removed from the
+                        # cross-node identity; all stable source fields must match.
+                        matches = all(actual.get(field) == field_value for field, field_value in value.items())
+                    else:
+                        matches = actual == value
+                    if not matches:
                         raise RGBFrameCacheError(f"RGB cache {key} mismatch: {path}")
                 rgb = cache["rgb"]
             if rgb.dtype != np.uint8 or rgb.ndim != 4 or rgb.shape[-1] != 3:
