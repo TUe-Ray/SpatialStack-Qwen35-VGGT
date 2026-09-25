@@ -1,6 +1,8 @@
 import json
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +76,25 @@ class ExactRGBFrameCacheTest(unittest.TestCase):
             cache._path(video, [3]).write_bytes(b"corrupt")
             with self.assertRaisesRegex(RGBFrameCacheError, "Cannot read"):
                 cache.load_or_create(video, [3], decode)
+
+    def test_parallel_cache_miss_decodes_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "scene.mp4"
+            video.write_bytes(b"fixture video")
+            cache = ExactRGBFrameCache(str(root / "rgb"))
+            calls = []
+
+            def decode():
+                calls.append(1)
+                time.sleep(0.1)
+                return [Image.new("RGB", (2, 2), (7, 8, 9))]
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _: cache.load_or_create(video, [7], decode), range(2)))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(sorted(hit for _, hit in results), [False, True])
+            self.assertEqual([images[0].getpixel((0, 0)) for images, _ in results], [(7, 8, 9)] * 2)
 
 
 if __name__ == "__main__":
